@@ -6,7 +6,10 @@ from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error
 
 
-DATA_PATH = Path("data/raw/train_FD001.txt")
+TRAIN_DATA_PATH = Path("data/raw/train_FD001.txt")
+TEST_DATA_PATH = Path("data/raw/test_FD001.txt")
+TEST_RUL_PATH = Path("data/raw/RUL_FD001.txt")
+
 
 COLUMN_NAMES = (
     ["engine_id", "cycle"]
@@ -15,8 +18,14 @@ COLUMN_NAMES = (
 )
 
 
+FEATURE_COLUMNS = (
+    [f"setting_{i}" for i in range(1, 4)]
+    + [f"sensor_{i}" for i in range(1, 22)]
+)
+
+
 def load_data(path: Path) -> pd.DataFrame:
-    """Load the NASA C-MAPSS FD001 training dataset."""
+    """Load a NASA C-MAPSS FD001 engine dataset."""
 
     df = pd.read_csv(
         path,
@@ -29,7 +38,7 @@ def load_data(path: Path) -> pd.DataFrame:
 
 
 def add_rul(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate Remaining Useful Life for every engine cycle."""
+    """Calculate Remaining Useful Life for every training engine cycle."""
 
     df = df.copy()
 
@@ -40,22 +49,32 @@ def add_rul(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def train_baseline_model(df: pd.DataFrame):
-    """Train and evaluate a baseline RUL prediction model."""
+def load_test_rul(path: Path) -> pd.DataFrame:
+    """Load the true RUL values for the FD001 test engines."""
 
-    feature_columns = (
-        [f"setting_{i}" for i in range(1, 4)]
-        + [f"sensor_{i}" for i in range(1, 22)]
+    rul = pd.read_csv(
+        path,
+        sep=r"\s+",
+        header=None,
+        names=["actual_rul"],
     )
+
+    rul["engine_id"] = range(1, len(rul) + 1)
+
+    return rul[["engine_id", "actual_rul"]]
+
+
+def train_baseline_model(df: pd.DataFrame):
+    """Train and validate a baseline Linear Regression RUL model."""
 
     # Keep entire engines separate between training and validation.
     train_data = df[df["engine_id"] <= 80]
     validation_data = df[df["engine_id"] > 80]
 
-    X_train = train_data[feature_columns]
+    X_train = train_data[FEATURE_COLUMNS]
     y_train = train_data["rul"]
 
-    X_validation = validation_data[feature_columns]
+    X_validation = validation_data[FEATURE_COLUMNS]
     y_validation = validation_data["rul"]
 
     model = LinearRegression()
@@ -69,7 +88,50 @@ def train_baseline_model(df: pd.DataFrame):
         predictions,
     )
 
-    return model, validation_data, predictions, mae 
+    return model, validation_data, predictions, mae
+
+
+def evaluate_test_set(
+    model: LinearRegression,
+    test_data: pd.DataFrame,
+    test_rul: pd.DataFrame,
+):
+    """Evaluate the trained model using the NASA FD001 test engines."""
+
+    # Use the final available sensor reading for each test engine.
+    latest_states = (
+        test_data
+        .sort_values(["engine_id", "cycle"])
+        .groupby("engine_id")
+        .tail(1)
+        .copy()
+    )
+
+    X_test = latest_states[FEATURE_COLUMNS]
+
+    predictions = model.predict(X_test)
+
+    # Keep raw predictions for honest model evaluation.
+    latest_states["predicted_rul_raw"] = predictions
+
+    # RUL cannot physically be below zero, so clip displayed predictions.
+    latest_states["predicted_rul"] = (
+        latest_states["predicted_rul_raw"]
+        .clip(lower=0)
+    )
+
+    results = latest_states.merge(
+        test_rul,
+        on="engine_id",
+        how="left",
+    )
+
+    test_mae = mean_absolute_error(
+        results["actual_rul"],
+        results["predicted_rul_raw"],
+    )
+
+    return results, test_mae
 
 
 def maintenance_decision(
@@ -79,14 +141,16 @@ def maintenance_decision(
 ) -> dict:
     """Convert predicted RUL into an illustrative maintenance decision."""
 
-    predicted_rul = max(0, predicted_rul)
+    predicted_rul = max(0.0, float(predicted_rul))
 
     if predicted_rul <= 30:
         risk = "HIGH"
         recommendation = "Schedule preventative maintenance"
+
     elif predicted_rul <= 60:
         risk = "MEDIUM"
         recommendation = "Increase monitoring"
+
     else:
         risk = "LOW"
         recommendation = "Continue operating"
@@ -104,7 +168,12 @@ def maintenance_decision(
 
 
 if __name__ == "__main__":
-    data = load_data(DATA_PATH)
+
+    # ---------------------------------------------------------
+    # Load training data and calculate RUL
+    # ---------------------------------------------------------
+
+    data = load_data(TRAIN_DATA_PATH)
     data = add_rul(data)
 
     print(data.head())
@@ -124,27 +193,49 @@ if __name__ == "__main__":
         ].tail()
     )
 
-    model, validation_data, predictions, mae = train_baseline_model(data)
+    # ---------------------------------------------------------
+    # Train baseline model
+    # ---------------------------------------------------------
+
+    model, validation_data, predictions, validation_mae = (
+        train_baseline_model(data)
+    )
 
     print()
-    print("Baseline RUL model")
+    print("Baseline RUL Model")
     print("------------------")
     print("Model: Linear Regression")
     print("Training engines: 80")
     print("Validation engines: 20")
-    print(f"Mean Absolute Error: {mae:.2f} cycles")
-
-    validation_results = validation_data.copy()
-    validation_results["predicted_rul"] = predictions
-
-    latest_engine_states = (
-        validation_results
-        .sort_values(["engine_id", "cycle"])
-        .groupby("engine_id")
-        .tail(1)
+    print(
+        f"Validation Mean Absolute Error: "
+        f"{validation_mae:.2f} cycles"
     )
 
-    example_engine = latest_engine_states.iloc[0]
+    # ---------------------------------------------------------
+    # Evaluate on official NASA test set
+    # ---------------------------------------------------------
+
+    test_data = load_data(TEST_DATA_PATH)
+    test_rul = load_test_rul(TEST_RUL_PATH)
+
+    test_results, test_mae = evaluate_test_set(
+        model,
+        test_data,
+        test_rul,
+    )
+
+    print()
+    print("NASA FD001 Test Evaluation")
+    print("--------------------------")
+    print(f"Test engines: {len(test_results)}")
+    print(f"Test Mean Absolute Error: {test_mae:.2f} cycles")
+
+    # ---------------------------------------------------------
+    # Example maintenance decision
+    # ---------------------------------------------------------
+
+    example_engine = test_results.iloc[0]
 
     decision = maintenance_decision(
         example_engine["predicted_rul"]
@@ -155,14 +246,29 @@ if __name__ == "__main__":
     print("--------------------")
     print(f"Engine: {int(example_engine['engine_id'])}")
     print(f"Current cycle: {int(example_engine['cycle'])}")
-    print(f"Actual RUL: {example_engine['rul']:.0f} cycles")
-    print(f"Predicted RUL: {decision['predicted_rul']:.1f} cycles")
+    print(
+        f"Actual RUL: "
+        f"{example_engine['actual_rul']:.0f} cycles"
+    )
+    print(
+        f"Predicted RUL: "
+        f"{decision['predicted_rul']:.1f} cycles"
+    )
     print(f"Risk level: {decision['risk']}")
     print(f"Recommendation: {decision['recommendation']}")
 
     print()
-    print("Illustrative financial assumptions")
+    print("Illustrative Financial Assumptions")
     print("----------------------------------")
-    print(f"Planned maintenance cost: £{decision['maintenance_cost']:,.0f}")
-    print(f"Unplanned failure cost: £{decision['failure_cost']:,.0f}")
-    print(f"Cost difference: £{decision['cost_difference']:,.0f}")
+    print(
+        f"Planned maintenance cost: "
+        f"£{decision['maintenance_cost']:,.0f}"
+    )
+    print(
+        f"Unplanned failure cost: "
+        f"£{decision['failure_cost']:,.0f}"
+    )
+    print(
+        f"Cost difference: "
+        f"£{decision['cost_difference']:,.0f}"
+    )
