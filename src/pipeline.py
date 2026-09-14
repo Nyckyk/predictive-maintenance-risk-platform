@@ -1,6 +1,8 @@
 from pathlib import Path
 
-import pandas as pd
+import pandas as pd 
+
+import matplotlib.pyplot as plt
 
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error
@@ -8,7 +10,8 @@ from sklearn.metrics import mean_absolute_error
 
 TRAIN_DATA_PATH = Path("data/raw/train_FD001.txt")
 TEST_DATA_PATH = Path("data/raw/test_FD001.txt")
-TEST_RUL_PATH = Path("data/raw/RUL_FD001.txt")
+TEST_RUL_PATH = Path("data/raw/RUL_FD001.txt") 
+OUTPUT_DIR = Path("outputs")
 
 
 COLUMN_NAMES = (
@@ -166,6 +169,48 @@ def maintenance_decision(
         "cost_difference": cost_difference,
     }
 
+def plot_test_predictions(results: pd.DataFrame) -> None:
+    """Plot actual versus predicted RUL for the NASA test engines."""
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    plt.figure(figsize=(8, 6))
+
+    plt.scatter(
+        results["actual_rul"],
+        results["predicted_rul"],
+        alpha=0.7,
+    )
+
+    max_rul = max(
+        results["actual_rul"].max(),
+        results["predicted_rul"].max(),
+    )
+
+    plt.plot(
+        [0, max_rul],
+        [0, max_rul],
+        linestyle="--",
+        label="Perfect prediction",
+    )
+
+    plt.xlabel("Actual RUL (cycles)")
+    plt.ylabel("Predicted RUL (cycles)")
+    plt.title("NASA C-MAPSS FD001: Actual vs Predicted RUL")
+    plt.legend()
+    plt.tight_layout()
+
+    output_path = OUTPUT_DIR / "baseline_actual_vs_predicted.png"
+
+    plt.savefig(
+        output_path,
+        dpi=300,
+        bbox_inches="tight",
+    )
+
+    plt.close()
+
+    print(f"Prediction plot saved to: {output_path}")
 
 if __name__ == "__main__":
 
@@ -225,6 +270,7 @@ if __name__ == "__main__":
         test_rul,
     )
 
+    plot_test_predictions(test_results) 
     print()
     print("NASA FD001 Test Evaluation")
     print("--------------------------")
