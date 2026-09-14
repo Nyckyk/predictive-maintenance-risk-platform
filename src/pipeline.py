@@ -69,7 +69,38 @@ def train_baseline_model(df: pd.DataFrame):
         predictions,
     )
 
-    return model, validation_data, predictions, mae
+    return model, validation_data, predictions, mae 
+
+
+def maintenance_decision(
+    predicted_rul: float,
+    maintenance_cost: float = 8000,
+    failure_cost: float = 40000,
+) -> dict:
+    """Convert predicted RUL into an illustrative maintenance decision."""
+
+    predicted_rul = max(0, predicted_rul)
+
+    if predicted_rul <= 30:
+        risk = "HIGH"
+        recommendation = "Schedule preventative maintenance"
+    elif predicted_rul <= 60:
+        risk = "MEDIUM"
+        recommendation = "Increase monitoring"
+    else:
+        risk = "LOW"
+        recommendation = "Continue operating"
+
+    cost_difference = failure_cost - maintenance_cost
+
+    return {
+        "predicted_rul": predicted_rul,
+        "risk": risk,
+        "recommendation": recommendation,
+        "maintenance_cost": maintenance_cost,
+        "failure_cost": failure_cost,
+        "cost_difference": cost_difference,
+    }
 
 
 if __name__ == "__main__":
@@ -102,3 +133,36 @@ if __name__ == "__main__":
     print("Training engines: 80")
     print("Validation engines: 20")
     print(f"Mean Absolute Error: {mae:.2f} cycles")
+
+    validation_results = validation_data.copy()
+    validation_results["predicted_rul"] = predictions
+
+    latest_engine_states = (
+        validation_results
+        .sort_values(["engine_id", "cycle"])
+        .groupby("engine_id")
+        .tail(1)
+    )
+
+    example_engine = latest_engine_states.iloc[0]
+
+    decision = maintenance_decision(
+        example_engine["predicted_rul"]
+    )
+
+    print()
+    print("Maintenance Decision")
+    print("--------------------")
+    print(f"Engine: {int(example_engine['engine_id'])}")
+    print(f"Current cycle: {int(example_engine['cycle'])}")
+    print(f"Actual RUL: {example_engine['rul']:.0f} cycles")
+    print(f"Predicted RUL: {decision['predicted_rul']:.1f} cycles")
+    print(f"Risk level: {decision['risk']}")
+    print(f"Recommendation: {decision['recommendation']}")
+
+    print()
+    print("Illustrative financial assumptions")
+    print("----------------------------------")
+    print(f"Planned maintenance cost: £{decision['maintenance_cost']:,.0f}")
+    print(f"Unplanned failure cost: £{decision['failure_cost']:,.0f}")
+    print(f"Cost difference: £{decision['cost_difference']:,.0f}")
