@@ -1,16 +1,19 @@
 from pathlib import Path
 
-import pandas as pd 
-
 import matplotlib.pyplot as plt
+import pandas as pd
 
+from sklearn.ensemble import (
+    GradientBoostingRegressor,
+    RandomForestRegressor,
+)
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error
 
 
 TRAIN_DATA_PATH = Path("data/raw/train_FD001.txt")
 TEST_DATA_PATH = Path("data/raw/test_FD001.txt")
-TEST_RUL_PATH = Path("data/raw/RUL_FD001.txt") 
+TEST_RUL_PATH = Path("data/raw/RUL_FD001.txt")
 OUTPUT_DIR = Path("outputs")
 
 
@@ -45,7 +48,10 @@ def add_rul(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.copy()
 
-    max_cycles = df.groupby("engine_id")["cycle"].transform("max")
+    max_cycles = (
+        df.groupby("engine_id")["cycle"]
+        .transform("max")
+    )
 
     df["rul"] = max_cycles - df["cycle"]
 
@@ -94,12 +100,71 @@ def train_baseline_model(df: pd.DataFrame):
     return model, validation_data, predictions, mae
 
 
+def compare_models(df: pd.DataFrame) -> pd.DataFrame:
+    """Compare candidate RUL prediction models on unseen engines."""
+
+    train_data = df[df["engine_id"] <= 80]
+    validation_data = df[df["engine_id"] > 80]
+
+    X_train = train_data[FEATURE_COLUMNS]
+    y_train = train_data["rul"]
+
+    X_validation = validation_data[FEATURE_COLUMNS]
+    y_validation = validation_data["rul"]
+
+    models = {
+        "Linear Regression": LinearRegression(),
+
+        "Random Forest": RandomForestRegressor(
+            n_estimators=200,
+            random_state=42,
+            n_jobs=-1,
+        ),
+
+        "Gradient Boosting": GradientBoostingRegressor(
+            n_estimators=200,
+            learning_rate=0.05,
+            max_depth=3,
+            random_state=42,
+        ),
+    }
+
+    results = []
+
+    for name, model in models.items():
+        model.fit(X_train, y_train)
+
+        predictions = model.predict(X_validation)
+
+        mae = mean_absolute_error(
+            y_validation,
+            predictions,
+        )
+
+        results.append(
+            {
+                "model": name,
+                "validation_mae": mae,
+            }
+        )
+
+    results_df = pd.DataFrame(results)
+
+    results_df = (
+        results_df
+        .sort_values("validation_mae")
+        .reset_index(drop=True)
+    )
+
+    return results_df
+
+
 def evaluate_test_set(
-    model: LinearRegression,
+    model,
     test_data: pd.DataFrame,
     test_rul: pd.DataFrame,
 ):
-    """Evaluate the trained model using the NASA FD001 test engines."""
+    """Evaluate a trained model using the NASA FD001 test engines."""
 
     # Use the final available sensor reading for each test engine.
     latest_states = (
@@ -114,10 +179,10 @@ def evaluate_test_set(
 
     predictions = model.predict(X_test)
 
-    # Keep raw predictions for honest model evaluation.
+    # Preserve raw predictions for honest evaluation.
     latest_states["predicted_rul_raw"] = predictions
 
-    # RUL cannot physically be below zero, so clip displayed predictions.
+    # Displayed RUL cannot physically be below zero.
     latest_states["predicted_rul"] = (
         latest_states["predicted_rul_raw"]
         .clip(lower=0)
@@ -169,10 +234,14 @@ def maintenance_decision(
         "cost_difference": cost_difference,
     }
 
+
 def plot_test_predictions(results: pd.DataFrame) -> None:
     """Plot actual versus predicted RUL for the NASA test engines."""
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     plt.figure(figsize=(8, 6))
 
@@ -196,11 +265,17 @@ def plot_test_predictions(results: pd.DataFrame) -> None:
 
     plt.xlabel("Actual RUL (cycles)")
     plt.ylabel("Predicted RUL (cycles)")
-    plt.title("NASA C-MAPSS FD001: Actual vs Predicted RUL")
+    plt.title(
+        "NASA C-MAPSS FD001: Actual vs Predicted RUL"
+    )
+
     plt.legend()
     plt.tight_layout()
 
-    output_path = OUTPUT_DIR / "baseline_actual_vs_predicted.png"
+    output_path = (
+        OUTPUT_DIR
+        / "baseline_actual_vs_predicted.png"
+    )
 
     plt.savefig(
         output_path,
@@ -210,7 +285,10 @@ def plot_test_predictions(results: pd.DataFrame) -> None:
 
     plt.close()
 
-    print(f"Prediction plot saved to: {output_path}")
+    print(
+        f"Prediction plot saved to: {output_path}"
+    )
+
 
 if __name__ == "__main__":
 
@@ -239,12 +317,15 @@ if __name__ == "__main__":
     )
 
     # ---------------------------------------------------------
-    # Train baseline model
+    # Train baseline Linear Regression model
     # ---------------------------------------------------------
 
-    model, validation_data, predictions, validation_mae = (
-        train_baseline_model(data)
-    )
+    (
+        model,
+        validation_data,
+        predictions,
+        validation_mae,
+    ) = train_baseline_model(data)
 
     print()
     print("Baseline RUL Model")
@@ -253,12 +334,43 @@ if __name__ == "__main__":
     print("Training engines: 80")
     print("Validation engines: 20")
     print(
-        f"Validation Mean Absolute Error: "
+        "Validation Mean Absolute Error: "
         f"{validation_mae:.2f} cycles"
     )
 
     # ---------------------------------------------------------
-    # Evaluate on official NASA test set
+    # Compare candidate models using validation engines
+    # ---------------------------------------------------------
+
+    model_comparison = compare_models(data)
+
+    print()
+    print("Model Comparison")
+    print("----------------")
+
+    print(
+        model_comparison.to_string(
+            index=False,
+            formatters={
+                "validation_mae": (
+                    lambda x: f"{x:.2f}"
+                )
+            },
+        )
+    )
+
+    best_model_name = (
+        model_comparison.iloc[0]["model"]
+    )
+
+    print()
+    print(
+        f"Best validation model: "
+        f"{best_model_name}"
+    )
+
+    # ---------------------------------------------------------
+    # Evaluate baseline on official NASA test set
     # ---------------------------------------------------------
 
     test_data = load_data(TEST_DATA_PATH)
@@ -270,12 +382,16 @@ if __name__ == "__main__":
         test_rul,
     )
 
-    plot_test_predictions(test_results) 
+    plot_test_predictions(test_results)
+
     print()
     print("NASA FD001 Test Evaluation")
     print("--------------------------")
     print(f"Test engines: {len(test_results)}")
-    print(f"Test Mean Absolute Error: {test_mae:.2f} cycles")
+    print(
+        f"Test Mean Absolute Error: "
+        f"{test_mae:.2f} cycles"
+    )
 
     # ---------------------------------------------------------
     # Example maintenance decision
@@ -290,8 +406,14 @@ if __name__ == "__main__":
     print()
     print("Maintenance Decision")
     print("--------------------")
-    print(f"Engine: {int(example_engine['engine_id'])}")
-    print(f"Current cycle: {int(example_engine['cycle'])}")
+    print(
+        f"Engine: "
+        f"{int(example_engine['engine_id'])}"
+    )
+    print(
+        f"Current cycle: "
+        f"{int(example_engine['cycle'])}"
+    )
     print(
         f"Actual RUL: "
         f"{example_engine['actual_rul']:.0f} cycles"
@@ -300,8 +422,14 @@ if __name__ == "__main__":
         f"Predicted RUL: "
         f"{decision['predicted_rul']:.1f} cycles"
     )
-    print(f"Risk level: {decision['risk']}")
-    print(f"Recommendation: {decision['recommendation']}")
+    print(
+        f"Risk level: "
+        f"{decision['risk']}"
+    )
+    print(
+        f"Recommendation: "
+        f"{decision['recommendation']}"
+    )
 
     print()
     print("Illustrative Financial Assumptions")
