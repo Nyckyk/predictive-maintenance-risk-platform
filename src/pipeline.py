@@ -13,7 +13,7 @@ from sklearn.model_selection import GroupKFold
 
 
 # ---------------------------------------------------------
-# Paths and configuration
+# Configuration
 # ---------------------------------------------------------
 
 TRAIN_DATA_PATH = Path("data/raw/train_FD001.txt")
@@ -38,6 +38,43 @@ FEATURE_COLUMNS = (
 )
 
 
+MODEL_NAMES = [
+    "Linear Regression",
+    "Random Forest",
+    "Gradient Boosting",
+]
+
+
+# ---------------------------------------------------------
+# Model creation
+# ---------------------------------------------------------
+
+def create_model(name: str):
+    """Create one of the candidate regression models."""
+
+    if name == "Linear Regression":
+        return LinearRegression()
+
+    if name == "Random Forest":
+        return RandomForestRegressor(
+            n_estimators=200,
+            random_state=42,
+            n_jobs=-1,
+        )
+
+    if name == "Gradient Boosting":
+        return GradientBoostingRegressor(
+            n_estimators=200,
+            learning_rate=0.05,
+            max_depth=3,
+            random_state=42,
+        )
+
+    raise ValueError(
+        f"Unknown model: {name}"
+    )
+
+
 # ---------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------
@@ -45,18 +82,16 @@ FEATURE_COLUMNS = (
 def load_data(path: Path) -> pd.DataFrame:
     """Load a NASA C-MAPSS FD001 engine dataset."""
 
-    df = pd.read_csv(
+    return pd.read_csv(
         path,
         sep=r"\s+",
         header=None,
         names=COLUMN_NAMES,
     )
 
-    return df
-
 
 def load_test_rul(path: Path) -> pd.DataFrame:
-    """Load the true RUL values for the FD001 test engines."""
+    """Load NASA's true RUL values for the FD001 test engines."""
 
     rul = pd.read_csv(
         path,
@@ -79,7 +114,9 @@ def load_test_rul(path: Path) -> pd.DataFrame:
 # RUL target creation
 # ---------------------------------------------------------
 
-def add_rul(df: pd.DataFrame) -> pd.DataFrame:
+def add_rul(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
     """Calculate uncapped Remaining Useful Life."""
 
     df = df.copy()
@@ -126,7 +163,7 @@ def add_capped_test_rul(
     test_rul: pd.DataFrame,
     cap: int = RUL_CAP,
 ) -> pd.DataFrame:
-    """Add a capped target for NASA test-set evaluation."""
+    """Add the corresponding capped test target."""
 
     test_rul = test_rul.copy()
 
@@ -145,9 +182,8 @@ def add_capped_test_rul(
 def train_baseline_model(
     df: pd.DataFrame,
 ):
-    """Train and validate a baseline Linear Regression model."""
+    """Train Linear Regression using an 80/20 engine split."""
 
-    # Keep entire engines separate to prevent leakage.
     train_data = df[
         df["engine_id"] <= 80
     ]
@@ -197,13 +233,13 @@ def train_baseline_model(
 
 
 # ---------------------------------------------------------
-# Single validation split comparison
+# Single-split model comparison
 # ---------------------------------------------------------
 
 def compare_models(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Compare candidate models on unseen validation engines."""
+    """Compare models using unseen engines 81-100."""
 
     train_data = df[
         df["engine_id"] <= 80
@@ -229,29 +265,13 @@ def compare_models(
         "rul"
     ]
 
-    models = {
-        "Linear Regression":
-            LinearRegression(),
-
-        "Random Forest":
-            RandomForestRegressor(
-                n_estimators=200,
-                random_state=42,
-                n_jobs=-1,
-            ),
-
-        "Gradient Boosting":
-            GradientBoostingRegressor(
-                n_estimators=200,
-                learning_rate=0.05,
-                max_depth=3,
-                random_state=42,
-            ),
-    }
-
     results = []
 
-    for name, model in models.items():
+    for name in MODEL_NAMES:
+
+        model = create_model(
+            name
+        )
 
         model.fit(
             X_train,
@@ -274,25 +294,25 @@ def compare_models(
             }
         )
 
-    results_df = pd.DataFrame(
-        results
-    )
-
     return (
-        results_df
-        .sort_values("validation_mae")
-        .reset_index(drop=True)
+        pd.DataFrame(results)
+        .sort_values(
+            "validation_mae"
+        )
+        .reset_index(
+            drop=True
+        )
     )
 
 
 # ---------------------------------------------------------
-# Engine-level cross-validation
+# Grouped cross-validation
 # ---------------------------------------------------------
 
 def cross_validate_models(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Compare models using 5-fold engine-level cross-validation."""
+    """Compare models using five engine-level folds."""
 
     X = df[
         FEATURE_COLUMNS
@@ -306,33 +326,13 @@ def cross_validate_models(
         "engine_id"
     ]
 
-    models = {
-        "Linear Regression":
-            LinearRegression(),
-
-        "Random Forest":
-            RandomForestRegressor(
-                n_estimators=200,
-                random_state=42,
-                n_jobs=-1,
-            ),
-
-        "Gradient Boosting":
-            GradientBoostingRegressor(
-                n_estimators=200,
-                learning_rate=0.05,
-                max_depth=3,
-                random_state=42,
-            ),
-    }
-
     group_kfold = GroupKFold(
         n_splits=5
     )
 
     results = []
 
-    for name, model in models.items():
+    for name in MODEL_NAMES:
 
         fold_maes = []
 
@@ -360,6 +360,11 @@ def cross_validate_models(
             y_validation = y.iloc[
                 validation_index
             ]
+
+            # Fresh model for every fold.
+            model = create_model(
+                name
+            )
 
             model.fit(
                 X_train,
@@ -394,25 +399,26 @@ def cross_validate_models(
             }
         )
 
-    results_df = pd.DataFrame(
-        results
-    )
-
     return (
-        results_df
-        .sort_values("mean_mae")
-        .reset_index(drop=True)
+        pd.DataFrame(results)
+        .sort_values(
+            "mean_mae"
+        )
+        .reset_index(
+            drop=True
+        )
     )
 
 
 # ---------------------------------------------------------
-# Final Gradient Boosting model
+# Final model
 # ---------------------------------------------------------
 
 def train_final_model(
     df: pd.DataFrame,
+    model_name: str,
 ):
-    """Train Gradient Boosting on all 100 training engines."""
+    """Train the selected model using all 100 training engines."""
 
     X_train = df[
         FEATURE_COLUMNS
@@ -422,11 +428,8 @@ def train_final_model(
         "rul"
     ]
 
-    model = GradientBoostingRegressor(
-        n_estimators=200,
-        learning_rate=0.05,
-        max_depth=3,
-        random_state=42,
+    model = create_model(
+        model_name
     )
 
     model.fit(
@@ -438,17 +441,15 @@ def train_final_model(
 
 
 # ---------------------------------------------------------
-# Uncapped NASA test evaluation
+# Test-set state extraction
 # ---------------------------------------------------------
 
-def evaluate_test_set(
-    model,
+def get_latest_engine_states(
     test_data: pd.DataFrame,
-    test_rul: pd.DataFrame,
-):
-    """Evaluate a trained model on the NASA FD001 test engines."""
+) -> pd.DataFrame:
+    """Return the final observed cycle for every test engine."""
 
-    latest_states = (
+    return (
         test_data
         .sort_values(
             ["engine_id", "cycle"]
@@ -460,6 +461,24 @@ def evaluate_test_set(
         .copy()
     )
 
+
+# ---------------------------------------------------------
+# Uncapped test evaluation
+# ---------------------------------------------------------
+
+def evaluate_test_set(
+    model,
+    test_data: pd.DataFrame,
+    test_rul: pd.DataFrame,
+):
+    """Evaluate uncapped RUL predictions."""
+
+    latest_states = (
+        get_latest_engine_states(
+            test_data
+        )
+    )
+
     X_test = latest_states[
         FEATURE_COLUMNS
     ]
@@ -468,12 +487,12 @@ def evaluate_test_set(
         X_test
     )
 
-    # Preserve raw predictions for honest metric calculation.
+    # Raw predictions are used for the metric.
     latest_states[
         "predicted_rul_raw"
     ] = predictions
 
-    # Negative displayed RUL is not physically meaningful.
+    # Only displayed values are constrained.
     latest_states[
         "predicted_rul"
     ] = (
@@ -490,8 +509,12 @@ def evaluate_test_set(
     )
 
     test_mae = mean_absolute_error(
-        results["actual_rul"],
-        results["predicted_rul_raw"],
+        results[
+            "actual_rul"
+        ],
+        results[
+            "predicted_rul_raw"
+        ],
     )
 
     return (
@@ -501,7 +524,7 @@ def evaluate_test_set(
 
 
 # ---------------------------------------------------------
-# Capped NASA test evaluation
+# Capped test evaluation
 # ---------------------------------------------------------
 
 def evaluate_capped_test_set(
@@ -509,18 +532,12 @@ def evaluate_capped_test_set(
     test_data: pd.DataFrame,
     test_rul: pd.DataFrame,
 ):
-    """Evaluate a model trained using capped RUL targets."""
+    """Evaluate capped-RUL model predictions."""
 
     latest_states = (
-        test_data
-        .sort_values(
-            ["engine_id", "cycle"]
+        get_latest_engine_states(
+            test_data
         )
-        .groupby(
-            "engine_id"
-        )
-        .tail(1)
-        .copy()
     )
 
     X_test = latest_states[
@@ -531,13 +548,18 @@ def evaluate_capped_test_set(
         X_test
     )
 
+    # Keep raw prediction for honest MAE evaluation.
+    latest_states[
+        "predicted_rul_capped_raw"
+    ] = predictions
+
+    # Deployment/display value is constrained to valid capped range.
     latest_states[
         "predicted_rul_capped"
     ] = (
-        pd.Series(
-            predictions,
-            index=latest_states.index,
-        )
+        latest_states[
+            "predicted_rul_capped_raw"
+        ]
         .clip(
             lower=0,
             upper=RUL_CAP,
@@ -550,12 +572,15 @@ def evaluate_capped_test_set(
         how="left",
     )
 
+    # IMPORTANT:
+    # use raw predictions for the metric,
+    # matching the cross-validation methodology.
     capped_mae = mean_absolute_error(
         results[
             "actual_rul_capped"
         ],
         results[
-            "predicted_rul_capped"
+            "predicted_rul_capped_raw"
         ],
     )
 
@@ -566,7 +591,7 @@ def evaluate_capped_test_set(
 
 
 # ---------------------------------------------------------
-# Maintenance and financial decision
+# Maintenance decision
 # ---------------------------------------------------------
 
 def maintenance_decision(
@@ -574,7 +599,7 @@ def maintenance_decision(
     maintenance_cost: float = 8000,
     failure_cost: float = 40000,
 ) -> dict:
-    """Convert predicted RUL into an illustrative maintenance decision."""
+    """Convert predicted RUL into a simple maintenance decision."""
 
     predicted_rul = max(
         0.0,
@@ -582,6 +607,7 @@ def maintenance_decision(
     )
 
     if predicted_rul <= 30:
+
         risk = "HIGH"
 
         recommendation = (
@@ -589,6 +615,7 @@ def maintenance_decision(
         )
 
     elif predicted_rul <= 60:
+
         risk = "MEDIUM"
 
         recommendation = (
@@ -596,6 +623,7 @@ def maintenance_decision(
         )
 
     else:
+
         risk = "LOW"
 
         recommendation = (
@@ -634,8 +662,9 @@ def maintenance_decision(
 
 def plot_test_predictions(
     results: pd.DataFrame,
+    model_name: str,
 ) -> None:
-    """Plot actual versus predicted uncapped RUL."""
+    """Plot uncapped actual versus predicted RUL."""
 
     OUTPUT_DIR.mkdir(
         parents=True,
@@ -682,7 +711,7 @@ def plot_test_predictions(
     )
 
     plt.title(
-        "Gradient Boosting: "
+        f"{model_name}: "
         "Actual vs Predicted RUL"
     )
 
@@ -714,9 +743,9 @@ def plot_test_predictions(
 
 if __name__ == "__main__":
 
-    # ---------------------------------------------------------
-    # Load uncapped training dataset
-    # ---------------------------------------------------------
+    # =========================================================
+    # UNCAPPED EXPERIMENT
+    # =========================================================
 
     data = load_data(
         TRAIN_DATA_PATH
@@ -731,7 +760,6 @@ if __name__ == "__main__":
     )
 
     print()
-
     print(
         f"Rows: {len(data):,}"
     )
@@ -762,7 +790,7 @@ if __name__ == "__main__":
     )
 
     # ---------------------------------------------------------
-    # Baseline Linear Regression
+    # Linear Regression baseline
     # ---------------------------------------------------------
 
     (
@@ -778,7 +806,6 @@ if __name__ == "__main__":
     print(
         "Baseline RUL Model"
     )
-
     print(
         "------------------"
     )
@@ -801,18 +828,19 @@ if __name__ == "__main__":
     )
 
     # ---------------------------------------------------------
-    # Single validation split comparison
+    # Single-split comparison
     # ---------------------------------------------------------
 
-    model_comparison = compare_models(
-        data
+    model_comparison = (
+        compare_models(
+            data
+        )
     )
 
     print()
     print(
         "Model Comparison"
     )
-
     print(
         "----------------"
     )
@@ -835,18 +863,19 @@ if __name__ == "__main__":
     )
 
     print()
-
     print(
         "Best validation model: "
         f"{best_validation_model}"
     )
 
     # ---------------------------------------------------------
-    # Uncapped 5-fold grouped cross-validation
+    # Grouped CV
     # ---------------------------------------------------------
 
-    cv_results = cross_validate_models(
-        data
+    cv_results = (
+        cross_validate_models(
+            data
+        )
     )
 
     print()
@@ -854,7 +883,6 @@ if __name__ == "__main__":
         "5-Fold Engine-Level "
         "Cross-Validation"
     )
-
     print(
         "------------------------------------"
     )
@@ -885,31 +913,32 @@ if __name__ == "__main__":
     )
 
     print()
-
     print(
         "Best cross-validation model: "
         f"{best_cv_model}"
     )
 
     # ---------------------------------------------------------
-    # Train final uncapped Gradient Boosting model
+    # Final uncapped model
     # ---------------------------------------------------------
 
-    final_model = train_final_model(
-        data
+    final_model = (
+        train_final_model(
+            data,
+            best_cv_model,
+        )
     )
 
     print()
     print(
-        "Final Model"
+        "Final Uncapped Model"
+    )
+    print(
+        "--------------------"
     )
 
     print(
-        "-----------"
-    )
-
-    print(
-        "Model: Gradient Boosting"
+        f"Model: {best_cv_model}"
     )
 
     print(
@@ -917,7 +946,7 @@ if __name__ == "__main__":
     )
 
     # ---------------------------------------------------------
-    # Official NASA uncapped test evaluation
+    # NASA test data
     # ---------------------------------------------------------
 
     test_data = load_data(
@@ -928,25 +957,30 @@ if __name__ == "__main__":
         TEST_RUL_PATH
     )
 
-    test_results, test_mae = (
-        evaluate_test_set(
-            final_model,
-            test_data,
-            test_rul,
-        )
+    # ---------------------------------------------------------
+    # Uncapped test evaluation
+    # ---------------------------------------------------------
+
+    (
+        test_results,
+        test_mae,
+    ) = evaluate_test_set(
+        final_model,
+        test_data,
+        test_rul,
     )
 
     plot_test_predictions(
-        test_results
+        test_results,
+        best_cv_model,
     )
 
     print()
     print(
-        "NASA FD001 Final Test Evaluation"
+        "NASA FD001 Uncapped Test Evaluation"
     )
-
     print(
-        "--------------------------------"
+        "-----------------------------------"
     )
 
     print(
@@ -955,13 +989,13 @@ if __name__ == "__main__":
     )
 
     print(
-        "Final Test Mean Absolute Error: "
+        "Uncapped Test MAE: "
         f"{test_mae:.2f} cycles"
     )
 
-    # ---------------------------------------------------------
-    # Capped-RUL experiment
-    # ---------------------------------------------------------
+    # =========================================================
+    # CAPPED-RUL EXPERIMENT
+    # =========================================================
 
     capped_data = load_data(
         TRAIN_DATA_PATH
@@ -981,7 +1015,6 @@ if __name__ == "__main__":
     print(
         "Capped-RUL Cross-Validation"
     )
-
     print(
         "---------------------------"
     )
@@ -1017,16 +1050,20 @@ if __name__ == "__main__":
     )
 
     print()
-
     print(
         "Best capped-RUL "
         "cross-validation model: "
         f"{capped_best_model}"
     )
 
+    # ---------------------------------------------------------
+    # Final capped model
+    # ---------------------------------------------------------
+
     capped_final_model = (
         train_final_model(
-            capped_data
+            capped_data,
+            capped_best_model,
         )
     )
 
@@ -1049,7 +1086,6 @@ if __name__ == "__main__":
     print(
         "Capped-RUL Test Evaluation"
     )
-
     print(
         "--------------------------"
     )
@@ -1060,33 +1096,38 @@ if __name__ == "__main__":
     )
 
     print(
+        f"Model: "
+        f"{capped_best_model}"
+    )
+
+    print(
         "Capped Test MAE: "
         f"{capped_test_mae:.2f} cycles"
     )
 
-    # ---------------------------------------------------------
-    # Example uncapped maintenance decision
-    # ---------------------------------------------------------
+    # =========================================================
+    # MAINTENANCE DECISION USING CAPPED MODEL
+    # =========================================================
 
     example_engine = (
-        test_results.iloc[0]
+        capped_results.iloc[0]
     )
 
     decision = (
         maintenance_decision(
             example_engine[
-                "predicted_rul"
+                "predicted_rul_capped"
             ]
         )
     )
 
     print()
     print(
-        "Maintenance Decision"
+        "Maintenance Decision "
+        "(Capped Model)"
     )
-
     print(
-        "--------------------"
+        "----------------------------"
     )
 
     print(
@@ -1100,13 +1141,13 @@ if __name__ == "__main__":
     )
 
     print(
-        "Actual RUL: "
-        f"{example_engine['actual_rul']:.0f} "
+        "Actual capped RUL: "
+        f"{example_engine['actual_rul_capped']:.0f} "
         "cycles"
     )
 
     print(
-        "Predicted RUL: "
+        "Predicted capped RUL: "
         f"{decision['predicted_rul']:.1f} "
         "cycles"
     )
@@ -1125,7 +1166,6 @@ if __name__ == "__main__":
     print(
         "Illustrative Financial Assumptions"
     )
-
     print(
         "----------------------------------"
     )
