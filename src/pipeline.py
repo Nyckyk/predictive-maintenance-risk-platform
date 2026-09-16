@@ -10,6 +10,7 @@ from sklearn.ensemble import (
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error
 
+from sklearn.model_selection import GroupKFold 
 
 TRAIN_DATA_PATH = Path("data/raw/train_FD001.txt")
 TEST_DATA_PATH = Path("data/raw/test_FD001.txt")
@@ -287,8 +288,75 @@ def plot_test_predictions(results: pd.DataFrame) -> None:
 
     print(
         f"Prediction plot saved to: {output_path}"
-    )
+    ) 
+    
+def cross_validate_models(df: pd.DataFrame) -> pd.DataFrame:
+    """Compare candidate models using engine-level cross-validation."""
 
+    X = df[FEATURE_COLUMNS]
+    y = df["rul"]
+    groups = df["engine_id"]
+
+    models = {
+        "Linear Regression": LinearRegression(),
+
+        "Random Forest": RandomForestRegressor(
+            n_estimators=200,
+            random_state=42,
+            n_jobs=-1,
+        ),
+
+        "Gradient Boosting": GradientBoostingRegressor(
+            n_estimators=200,
+            learning_rate=0.05,
+            max_depth=3,
+            random_state=42,
+        ),
+    }
+
+    group_kfold = GroupKFold(n_splits=5)
+
+    results = []
+
+    for name, model in models.items():
+        fold_maes = []
+
+        for train_index, validation_index in group_kfold.split(
+            X,
+            y,
+            groups=groups,
+        ):
+            X_train = X.iloc[train_index]
+            y_train = y.iloc[train_index]
+
+            X_validation = X.iloc[validation_index]
+            y_validation = y.iloc[validation_index]
+
+            model.fit(X_train, y_train)
+
+            predictions = model.predict(X_validation)
+
+            mae = mean_absolute_error(
+                y_validation,
+                predictions,
+            )
+
+            fold_maes.append(mae)
+
+        results.append(
+            {
+                "model": name,
+                "mean_mae": sum(fold_maes) / len(fold_maes),
+                "min_mae": min(fold_maes),
+                "max_mae": max(fold_maes),
+            }
+        )
+
+    return (
+        pd.DataFrame(results)
+        .sort_values("mean_mae")
+        .reset_index(drop=True)
+    ) 
 
 if __name__ == "__main__":
 
@@ -369,6 +437,30 @@ if __name__ == "__main__":
         f"{best_model_name}"
     )
 
+    cv_results = cross_validate_models(data)
+
+    print()
+    print("5-Fold Engine-Level Cross-Validation")
+    print("------------------------------------")
+
+    print(
+        cv_results.to_string(
+            index=False,
+            formatters={
+                "mean_mae": lambda x: f"{x:.2f}",
+                "min_mae": lambda x: f"{x:.2f}",
+                "max_mae": lambda x: f"{x:.2f}",
+            },
+        )
+    )
+
+    best_cv_model = cv_results.iloc[0]["model"]
+
+    print()
+    print(
+        f"Best cross-validation model: "
+        f"{best_cv_model}"
+    )
     # ---------------------------------------------------------
     # Evaluate baseline on official NASA test set
     # ---------------------------------------------------------
