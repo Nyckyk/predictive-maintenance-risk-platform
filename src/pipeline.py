@@ -589,6 +589,92 @@ def evaluate_capped_test_set(
         capped_mae,
     )
 
+def analyse_risk_regions(
+    results: pd.DataFrame,
+) -> pd.DataFrame:
+    """Measure capped-RUL prediction error within maintenance risk regions."""
+
+    analysis = results.copy()
+
+    def assign_risk(rul: float) -> str:
+        if rul <= 30:
+            return "HIGH"
+
+        if rul <= 60:
+            return "MEDIUM"
+
+        return "LOW"
+
+    analysis["actual_risk"] = (
+        analysis["actual_rul_capped"]
+        .apply(assign_risk)
+    )
+
+    analysis["absolute_error"] = (
+        analysis["predicted_rul_capped_raw"]
+        - analysis["actual_rul_capped"]
+    ).abs()
+
+    analysis["signed_error"] = (
+        analysis["predicted_rul_capped_raw"]
+        - analysis["actual_rul_capped"]
+    )
+
+    analysis["overprediction"] = (
+        analysis["predicted_rul_capped_raw"]
+        > analysis["actual_rul_capped"]
+    )
+
+    risk_summary = (
+        analysis
+        .groupby(
+            "actual_risk",
+            observed=True,
+        )
+        .agg(
+            engines=(
+                "engine_id",
+                "count",
+            ),
+            mae=(
+                "absolute_error",
+                "mean",
+            ),
+            mean_error=(
+                "signed_error",
+                "mean",
+            ),
+            overprediction_rate=(
+                "overprediction",
+                "mean",
+            ),
+        )
+        .reset_index()
+    )
+
+    risk_order = {
+        "HIGH": 0,
+        "MEDIUM": 1,
+        "LOW": 2,
+    }
+
+    risk_summary["risk_order"] = (
+        risk_summary["actual_risk"]
+        .map(risk_order)
+    )
+
+    risk_summary = (
+        risk_summary
+        .sort_values("risk_order")
+        .drop(columns="risk_order")
+        .reset_index(drop=True)
+    )
+
+    risk_summary[
+        "overprediction_rate"
+    ] *= 100
+
+    return risk_summary 
 
 # ---------------------------------------------------------
 # Maintenance decision
@@ -1105,6 +1191,40 @@ if __name__ == "__main__":
         f"{capped_test_mae:.2f} cycles"
     )
 
+    # ---------------------------------------------------------
+    # Risk-region error analysis
+    # ---------------------------------------------------------
+
+    risk_analysis = analyse_risk_regions(
+        capped_results
+    )
+
+    print()
+    print(
+        "Risk-Region Error Analysis"
+    )
+    print(
+        "--------------------------"
+    )
+
+    print(
+        risk_analysis.to_string(
+            index=False,
+            formatters={
+                "mae":
+                    lambda x:
+                    f"{x:.2f}",
+
+                "mean_error":
+                    lambda x:
+                    f"{x:+.2f}",
+
+                "overprediction_rate":
+                    lambda x:
+                    f"{x:.1f}%",
+            },
+        )
+    ) 
     # =========================================================
     # MAINTENANCE DECISION USING CAPPED MODEL
     # =========================================================
