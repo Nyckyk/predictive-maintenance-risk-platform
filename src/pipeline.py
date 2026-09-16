@@ -12,9 +12,9 @@ from sklearn.metrics import mean_absolute_error
 from sklearn.model_selection import GroupKFold
 
 
-# ---------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------
+# =========================================================
+# CONFIGURATION
+# =========================================================
 
 TRAIN_DATA_PATH = Path("data/raw/train_FD001.txt")
 TEST_DATA_PATH = Path("data/raw/test_FD001.txt")
@@ -23,6 +23,13 @@ TEST_RUL_PATH = Path("data/raw/RUL_FD001.txt")
 OUTPUT_DIR = Path("outputs")
 
 RUL_CAP = 125
+
+ACTUAL_HIGH_THRESHOLD = 30
+MEDIUM_THRESHOLD = 60
+
+TARGET_HIGH_RECALL = 0.90
+THRESHOLD_SEARCH_MIN = 20
+THRESHOLD_SEARCH_MAX = 60
 
 
 COLUMN_NAMES = (
@@ -45,9 +52,9 @@ MODEL_NAMES = [
 ]
 
 
-# ---------------------------------------------------------
-# Model creation
-# ---------------------------------------------------------
+# =========================================================
+# MODEL CREATION
+# =========================================================
 
 def create_model(name: str):
     """Create one of the candidate regression models."""
@@ -75,12 +82,14 @@ def create_model(name: str):
     )
 
 
-# ---------------------------------------------------------
-# Data loading
-# ---------------------------------------------------------
+# =========================================================
+# DATA LOADING
+# =========================================================
 
-def load_data(path: Path) -> pd.DataFrame:
-    """Load a NASA C-MAPSS FD001 engine dataset."""
+def load_data(
+    path: Path,
+) -> pd.DataFrame:
+    """Load a NASA C-MAPSS FD001 dataset."""
 
     return pd.read_csv(
         path,
@@ -90,8 +99,10 @@ def load_data(path: Path) -> pd.DataFrame:
     )
 
 
-def load_test_rul(path: Path) -> pd.DataFrame:
-    """Load NASA's true RUL values for the FD001 test engines."""
+def load_test_rul(
+    path: Path,
+) -> pd.DataFrame:
+    """Load NASA's true RUL values for FD001 test engines."""
 
     rul = pd.read_csv(
         path,
@@ -110,9 +121,9 @@ def load_test_rul(path: Path) -> pd.DataFrame:
     ]
 
 
-# ---------------------------------------------------------
-# RUL target creation
-# ---------------------------------------------------------
+# =========================================================
+# RUL TARGET CREATION
+# =========================================================
 
 def add_rul(
     df: pd.DataFrame,
@@ -163,7 +174,7 @@ def add_capped_test_rul(
     test_rul: pd.DataFrame,
     cap: int = RUL_CAP,
 ) -> pd.DataFrame:
-    """Add the corresponding capped test target."""
+    """Add capped RUL values to NASA test targets."""
 
     test_rul = test_rul.copy()
 
@@ -175,9 +186,42 @@ def add_capped_test_rul(
     return test_rul
 
 
-# ---------------------------------------------------------
-# Baseline Linear Regression
-# ---------------------------------------------------------
+# =========================================================
+# RISK FUNCTIONS
+# =========================================================
+
+def assign_actual_risk(
+    rul: float,
+) -> str:
+    """Convert actual RUL into the reference risk category."""
+
+    if rul <= ACTUAL_HIGH_THRESHOLD:
+        return "HIGH"
+
+    if rul <= MEDIUM_THRESHOLD:
+        return "MEDIUM"
+
+    return "LOW"
+
+
+def assign_predicted_risk(
+    rul: float,
+    high_threshold: int,
+) -> str:
+    """Convert predicted RUL into an operational risk category."""
+
+    if rul <= high_threshold:
+        return "HIGH"
+
+    if rul <= MEDIUM_THRESHOLD:
+        return "MEDIUM"
+
+    return "LOW"
+
+
+# =========================================================
+# BASELINE MODEL
+# =========================================================
 
 def train_baseline_model(
     df: pd.DataFrame,
@@ -232,14 +276,14 @@ def train_baseline_model(
     )
 
 
-# ---------------------------------------------------------
-# Single-split model comparison
-# ---------------------------------------------------------
+# =========================================================
+# SINGLE VALIDATION SPLIT
+# =========================================================
 
 def compare_models(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Compare models using unseen engines 81-100."""
+    """Compare models using engines 81-100 for validation."""
 
     train_data = df[
         df["engine_id"] <= 80
@@ -296,18 +340,14 @@ def compare_models(
 
     return (
         pd.DataFrame(results)
-        .sort_values(
-            "validation_mae"
-        )
-        .reset_index(
-            drop=True
-        )
+        .sort_values("validation_mae")
+        .reset_index(drop=True)
     )
 
 
-# ---------------------------------------------------------
-# Grouped cross-validation
-# ---------------------------------------------------------
+# =========================================================
+# GROUPED CROSS-VALIDATION
+# =========================================================
 
 def cross_validate_models(
     df: pd.DataFrame,
@@ -361,7 +401,6 @@ def cross_validate_models(
                 validation_index
             ]
 
-            # Fresh model for every fold.
             model = create_model(
                 name
             )
@@ -401,24 +440,253 @@ def cross_validate_models(
 
     return (
         pd.DataFrame(results)
-        .sort_values(
-            "mean_mae"
-        )
-        .reset_index(
-            drop=True
-        )
+        .sort_values("mean_mae")
+        .reset_index(drop=True)
     )
 
 
-# ---------------------------------------------------------
-# Final model
-# ---------------------------------------------------------
+# =========================================================
+# OUT-OF-FOLD PREDICTIONS
+# =========================================================
+
+def generate_oof_predictions(
+    df: pd.DataFrame,
+    model_name: str,
+) -> pd.DataFrame:
+    """
+    Generate engine-safe out-of-fold predictions.
+
+    No engine is predicted by a model that was trained
+    using data from that same engine.
+    """
+
+    X = df[
+        FEATURE_COLUMNS
+    ]
+
+    y = df[
+        "rul"
+    ]
+
+    groups = df[
+        "engine_id"
+    ]
+
+    predictions = pd.Series(
+        index=df.index,
+        dtype=float,
+    )
+
+    group_kfold = GroupKFold(
+        n_splits=5
+    )
+
+    for (
+        train_index,
+        validation_index,
+    ) in group_kfold.split(
+        X,
+        y,
+        groups=groups,
+    ):
+
+        model = create_model(
+            model_name
+        )
+
+        model.fit(
+            X.iloc[train_index],
+            y.iloc[train_index],
+        )
+
+        fold_predictions = model.predict(
+            X.iloc[validation_index]
+        )
+
+        predictions.iloc[
+            validation_index
+        ] = fold_predictions
+
+    results = df[
+        [
+            "engine_id",
+            "cycle",
+            "rul",
+        ]
+    ].copy()
+
+    results[
+        "predicted_rul"
+    ] = predictions
+
+    return results
+
+
+# =========================================================
+# HIGH-RISK THRESHOLD OPTIMISATION
+# =========================================================
+
+def optimise_high_risk_threshold(
+    oof_results: pd.DataFrame,
+    actual_high_threshold: int = ACTUAL_HIGH_THRESHOLD,
+    target_recall: float = TARGET_HIGH_RECALL,
+) -> pd.DataFrame:
+    """
+    Select an alert threshold using training OOF predictions.
+
+    The lowest-cost threshold meeting the requested HIGH-risk
+    recall is selected by minimising the false-positive rate.
+    """
+
+    actual_high = (
+        oof_results["rul"]
+        <= actual_high_threshold
+    )
+
+    results = []
+
+    for threshold in range(
+        THRESHOLD_SEARCH_MIN,
+        THRESHOLD_SEARCH_MAX + 1,
+    ):
+
+        predicted_high = (
+            oof_results["predicted_rul"]
+            <= threshold
+        )
+
+        true_positive = (
+            actual_high
+            & predicted_high
+        ).sum()
+
+        false_negative = (
+            actual_high
+            & ~predicted_high
+        ).sum()
+
+        false_positive = (
+            ~actual_high
+            & predicted_high
+        ).sum()
+
+        true_negative = (
+            ~actual_high
+            & ~predicted_high
+        ).sum()
+
+        recall_denominator = (
+            true_positive
+            + false_negative
+        )
+
+        precision_denominator = (
+            true_positive
+            + false_positive
+        )
+
+        negative_denominator = (
+            false_positive
+            + true_negative
+        )
+
+        recall = (
+            true_positive
+            / recall_denominator
+            if recall_denominator > 0
+            else 0.0
+        )
+
+        precision = (
+            true_positive
+            / precision_denominator
+            if precision_denominator > 0
+            else 0.0
+        )
+
+        false_positive_rate = (
+            false_positive
+            / negative_denominator
+            if negative_denominator > 0
+            else 0.0
+        )
+
+        results.append(
+            {
+                "threshold":
+                    threshold,
+
+                "high_recall":
+                    recall,
+
+                "high_precision":
+                    precision,
+
+                "false_positive_rate":
+                    false_positive_rate,
+
+                "true_positive":
+                    int(true_positive),
+
+                "false_negative":
+                    int(false_negative),
+
+                "false_positive":
+                    int(false_positive),
+
+                "true_negative":
+                    int(true_negative),
+            }
+        )
+
+    results_df = pd.DataFrame(
+        results
+    )
+
+    eligible = results_df[
+        results_df["high_recall"]
+        >= target_recall
+    ]
+
+    results_df[
+        "selected"
+    ] = False
+
+    if not eligible.empty:
+
+        selected_row = (
+            eligible
+            .sort_values(
+                [
+                    "false_positive_rate",
+                    "threshold",
+                ]
+            )
+            .iloc[0]
+        )
+
+        selected_threshold = int(
+            selected_row["threshold"]
+        )
+
+        results_df.loc[
+            results_df["threshold"]
+            == selected_threshold,
+            "selected",
+        ] = True
+
+    return results_df
+
+
+# =========================================================
+# FINAL MODEL
+# =========================================================
 
 def train_final_model(
     df: pd.DataFrame,
     model_name: str,
 ):
-    """Train the selected model using all 100 training engines."""
+    """Train the selected model on all training engines."""
 
     X_train = df[
         FEATURE_COLUMNS
@@ -440,14 +708,14 @@ def train_final_model(
     return model
 
 
-# ---------------------------------------------------------
-# Test-set state extraction
-# ---------------------------------------------------------
+# =========================================================
+# TEST STATE EXTRACTION
+# =========================================================
 
 def get_latest_engine_states(
     test_data: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Return the final observed cycle for every test engine."""
+    """Return the final observed state of each test engine."""
 
     return (
         test_data
@@ -462,9 +730,9 @@ def get_latest_engine_states(
     )
 
 
-# ---------------------------------------------------------
-# Uncapped test evaluation
-# ---------------------------------------------------------
+# =========================================================
+# UNCAPPED TEST EVALUATION
+# =========================================================
 
 def evaluate_test_set(
     model,
@@ -487,12 +755,10 @@ def evaluate_test_set(
         X_test
     )
 
-    # Raw predictions are used for the metric.
     latest_states[
         "predicted_rul_raw"
     ] = predictions
 
-    # Only displayed values are constrained.
     latest_states[
         "predicted_rul"
     ] = (
@@ -509,12 +775,8 @@ def evaluate_test_set(
     )
 
     test_mae = mean_absolute_error(
-        results[
-            "actual_rul"
-        ],
-        results[
-            "predicted_rul_raw"
-        ],
+        results["actual_rul"],
+        results["predicted_rul_raw"],
     )
 
     return (
@@ -523,9 +785,9 @@ def evaluate_test_set(
     )
 
 
-# ---------------------------------------------------------
-# Capped test evaluation
-# ---------------------------------------------------------
+# =========================================================
+# CAPPED TEST EVALUATION
+# =========================================================
 
 def evaluate_capped_test_set(
     model,
@@ -548,12 +810,10 @@ def evaluate_capped_test_set(
         X_test
     )
 
-    # Keep raw prediction for honest MAE evaluation.
     latest_states[
         "predicted_rul_capped_raw"
     ] = predictions
 
-    # Deployment/display value is constrained to valid capped range.
     latest_states[
         "predicted_rul_capped"
     ] = (
@@ -572,9 +832,6 @@ def evaluate_capped_test_set(
         how="left",
     )
 
-    # IMPORTANT:
-    # use raw predictions for the metric,
-    # matching the cross-validation methodology.
     capped_mae = mean_absolute_error(
         results[
             "actual_rul_capped"
@@ -589,40 +846,58 @@ def evaluate_capped_test_set(
         capped_mae,
     )
 
+
+# =========================================================
+# RISK-REGION ERROR ANALYSIS
+# =========================================================
+
 def analyse_risk_regions(
     results: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Measure capped-RUL prediction error within maintenance risk regions."""
+    """Measure error within actual maintenance-risk regions."""
 
     analysis = results.copy()
 
-    def assign_risk(rul: float) -> str:
-        if rul <= 30:
-            return "HIGH"
-
-        if rul <= 60:
-            return "MEDIUM"
-
-        return "LOW"
-
-    analysis["actual_risk"] = (
-        analysis["actual_rul_capped"]
-        .apply(assign_risk)
+    analysis[
+        "actual_risk"
+    ] = (
+        analysis[
+            "actual_rul_capped"
+        ]
+        .apply(assign_actual_risk)
     )
 
-    analysis["absolute_error"] = (
-        analysis["predicted_rul_capped_raw"]
-        - analysis["actual_rul_capped"]
+    analysis[
+        "absolute_error"
+    ] = (
+        analysis[
+            "predicted_rul_capped_raw"
+        ]
+        - analysis[
+            "actual_rul_capped"
+        ]
     ).abs()
 
-    analysis["signed_error"] = (
-        analysis["predicted_rul_capped_raw"]
-        - analysis["actual_rul_capped"]
+    analysis[
+        "signed_error"
+    ] = (
+        analysis[
+            "predicted_rul_capped_raw"
+        ]
+        - analysis[
+            "actual_rul_capped"
+        ]
     )
 
-    analysis["overprediction"] = (
-        analysis["predicted_rul_capped_raw"]
-        > analysis["actual_rul_capped"]
+    analysis[
+        "overprediction"
+    ] = (
+        analysis[
+            "predicted_rul_capped_raw"
+        ]
+        > analysis[
+            "actual_rul_capped"
+        ]
     )
 
     risk_summary = (
@@ -658,48 +933,69 @@ def analyse_risk_regions(
         "LOW": 2,
     }
 
-    risk_summary["risk_order"] = (
-        risk_summary["actual_risk"]
+    risk_summary[
+        "risk_order"
+    ] = (
+        risk_summary[
+            "actual_risk"
+        ]
         .map(risk_order)
     )
 
     risk_summary = (
         risk_summary
-        .sort_values("risk_order")
-        .drop(columns="risk_order")
-        .reset_index(drop=True)
+        .sort_values(
+            "risk_order"
+        )
+        .drop(
+            columns="risk_order"
+        )
+        .reset_index(
+            drop=True
+        )
     )
 
     risk_summary[
         "overprediction_rate"
     ] *= 100
 
-    return risk_summary 
+    return risk_summary
+
+
+# =========================================================
+# MAINTENANCE CLASSIFICATION
+# =========================================================
 
 def analyse_maintenance_classification(
     results: pd.DataFrame,
+    predicted_high_threshold: int,
 ):
-    """Evaluate maintenance-risk classification performance."""
+    """Evaluate maintenance-risk classification."""
 
     analysis = results.copy()
 
-    def assign_risk(rul: float) -> str:
-        if rul <= 30:
-            return "HIGH"
-
-        if rul <= 60:
-            return "MEDIUM"
-
-        return "LOW"
-
-    analysis["actual_risk"] = (
-        analysis["actual_rul_capped"]
-        .apply(assign_risk)
+    analysis[
+        "actual_risk"
+    ] = (
+        analysis[
+            "actual_rul_capped"
+        ]
+        .apply(assign_actual_risk)
     )
 
-    analysis["predicted_risk"] = (
-        analysis["predicted_rul_capped"]
-        .apply(assign_risk)
+    analysis[
+        "predicted_risk"
+    ] = (
+        analysis[
+            "predicted_rul_capped"
+        ]
+        .apply(
+            lambda rul:
+            assign_predicted_risk(
+                rul,
+                predicted_high_threshold,
+            )
+        )
     )
 
     risk_order = [
@@ -731,99 +1027,121 @@ def analyse_maintenance_classification(
 
     accuracy = correct.mean()
 
-    high_risk = (
+    actual_high = (
         analysis["actual_risk"]
         == "HIGH"
     )
 
-    high_risk_correct = (
-        high_risk
-        & (
-            analysis["predicted_risk"]
-            == "HIGH"
-        )
+    predicted_high = (
+        analysis["predicted_risk"]
+        == "HIGH"
     )
 
-    high_risk_recall = (
-        high_risk_correct.sum()
-        / high_risk.sum()
+    true_positive = (
+        actual_high
+        & predicted_high
     )
 
-    high_risk_missed = (
-        high_risk
-        & (
-            analysis["predicted_risk"]
-            != "HIGH"
-        )
+    false_negative = (
+        actual_high
+        & ~predicted_high
+    )
+
+    false_positive = (
+        ~actual_high
+        & predicted_high
     )
 
     high_to_low = (
-        high_risk
+        actual_high
         & (
             analysis["predicted_risk"]
             == "LOW"
         )
     )
 
+    high_recall = (
+        true_positive.sum()
+        / actual_high.sum()
+        if actual_high.sum() > 0
+        else 0.0
+    )
+
+    high_precision = (
+        true_positive.sum()
+        / predicted_high.sum()
+        if predicted_high.sum() > 0
+        else 0.0
+    )
+
     summary = {
-        "accuracy": accuracy,
-        "high_risk_engines": int(
-            high_risk.sum()
-        ),
-        "high_risk_correct": int(
-            high_risk_correct.sum()
-        ),
-        "high_risk_missed": int(
-            high_risk_missed.sum()
-        ),
+        "accuracy":
+            accuracy,
+
+        "high_risk_engines":
+            int(actual_high.sum()),
+
+        "high_risk_correct":
+            int(true_positive.sum()),
+
+        "high_risk_missed":
+            int(false_negative.sum()),
+
         "high_risk_recall":
-            high_risk_recall,
-        "high_to_low_misses": int(
-            high_to_low.sum()
-        ),
+            high_recall,
+
+        "high_risk_precision":
+            high_precision,
+
+        "false_high_alerts":
+            int(false_positive.sum()),
+
+        "high_to_low_misses":
+            int(high_to_low.sum()),
     }
 
     return (
         analysis,
         confusion_matrix,
         summary,
-    ) 
+    )
 
-# ---------------------------------------------------------
-# Maintenance decision
-# ---------------------------------------------------------
+
+# =========================================================
+# MAINTENANCE DECISION
+# =========================================================
 
 def maintenance_decision(
     predicted_rul: float,
+    high_threshold: int,
     maintenance_cost: float = 8000,
     failure_cost: float = 40000,
 ) -> dict:
-    """Convert predicted RUL into a simple maintenance decision."""
+    """Convert predicted RUL into an operational decision."""
 
     predicted_rul = max(
         0.0,
         float(predicted_rul),
     )
 
-    if predicted_rul <= 30:
+    risk = assign_predicted_risk(
+        predicted_rul,
+        high_threshold,
+    )
 
-        risk = "HIGH"
+    if risk == "HIGH":
 
         recommendation = (
             "Schedule preventative maintenance"
         )
 
-    elif predicted_rul <= 60:
-
-        risk = "MEDIUM"
+    elif risk == "MEDIUM":
 
         recommendation = (
             "Increase monitoring"
         )
 
     else:
-
-        risk = "LOW"
 
         recommendation = (
             "Continue operating"
@@ -855,9 +1173,9 @@ def maintenance_decision(
     }
 
 
-# ---------------------------------------------------------
-# Visualisation
-# ---------------------------------------------------------
+# =========================================================
+# VISUALISATION
+# =========================================================
 
 def plot_test_predictions(
     results: pd.DataFrame,
@@ -875,23 +1193,14 @@ def plot_test_predictions(
     )
 
     plt.scatter(
-        results[
-            "actual_rul"
-        ],
-        results[
-            "predicted_rul"
-        ],
+        results["actual_rul"],
+        results["predicted_rul"],
         alpha=0.7,
     )
 
     max_rul = max(
-        results[
-            "actual_rul"
-        ].max(),
-
-        results[
-            "predicted_rul"
-        ].max(),
+        results["actual_rul"].max(),
+        results["predicted_rul"].max(),
     )
 
     plt.plot(
@@ -936,15 +1245,15 @@ def plot_test_predictions(
     )
 
 
-# ---------------------------------------------------------
-# Main program
-# ---------------------------------------------------------
+# =========================================================
+# MAIN PROGRAM
+# =========================================================
 
 if __name__ == "__main__":
 
-    # =========================================================
+    # =====================================================
     # UNCAPPED EXPERIMENT
-    # =========================================================
+    # =====================================================
 
     data = load_data(
         TRAIN_DATA_PATH
@@ -988,9 +1297,9 @@ if __name__ == "__main__":
         ].tail()
     )
 
-    # ---------------------------------------------------------
-    # Linear Regression baseline
-    # ---------------------------------------------------------
+    # -----------------------------------------------------
+    # Baseline
+    # -----------------------------------------------------
 
     (
         baseline_model,
@@ -1026,9 +1335,9 @@ if __name__ == "__main__":
         f"{validation_mae:.2f} cycles"
     )
 
-    # ---------------------------------------------------------
-    # Single-split comparison
-    # ---------------------------------------------------------
+    # -----------------------------------------------------
+    # Model comparison
+    # -----------------------------------------------------
 
     model_comparison = (
         compare_models(
@@ -1050,7 +1359,7 @@ if __name__ == "__main__":
             formatters={
                 "validation_mae":
                     lambda x:
-                    f"{x:.2f}"
+                    f"{x:.2f}",
             },
         )
     )
@@ -1067,9 +1376,9 @@ if __name__ == "__main__":
         f"{best_validation_model}"
     )
 
-    # ---------------------------------------------------------
-    # Grouped CV
-    # ---------------------------------------------------------
+    # -----------------------------------------------------
+    # Uncapped grouped CV
+    # -----------------------------------------------------
 
     cv_results = (
         cross_validate_models(
@@ -1117,9 +1426,9 @@ if __name__ == "__main__":
         f"{best_cv_model}"
     )
 
-    # ---------------------------------------------------------
+    # -----------------------------------------------------
     # Final uncapped model
-    # ---------------------------------------------------------
+    # -----------------------------------------------------
 
     final_model = (
         train_final_model(
@@ -1144,9 +1453,9 @@ if __name__ == "__main__":
         "Training engines: 100"
     )
 
-    # ---------------------------------------------------------
-    # NASA test data
-    # ---------------------------------------------------------
+    # -----------------------------------------------------
+    # Test data
+    # -----------------------------------------------------
 
     test_data = load_data(
         TEST_DATA_PATH
@@ -1155,10 +1464,6 @@ if __name__ == "__main__":
     test_rul = load_test_rul(
         TEST_RUL_PATH
     )
-
-    # ---------------------------------------------------------
-    # Uncapped test evaluation
-    # ---------------------------------------------------------
 
     (
         test_results,
@@ -1192,9 +1497,9 @@ if __name__ == "__main__":
         f"{test_mae:.2f} cycles"
     )
 
-    # =========================================================
+    # =====================================================
     # CAPPED-RUL EXPERIMENT
-    # =========================================================
+    # =====================================================
 
     capped_data = load_data(
         TRAIN_DATA_PATH
@@ -1255,9 +1560,131 @@ if __name__ == "__main__":
         f"{capped_best_model}"
     )
 
-    # ---------------------------------------------------------
-    # Final capped model
-    # ---------------------------------------------------------
+    # =====================================================
+    # THRESHOLD OPTIMISATION USING TRAINING DATA ONLY
+    # =====================================================
+
+    oof_results = (
+        generate_oof_predictions(
+            capped_data,
+            capped_best_model,
+        )
+    )
+
+    threshold_results = (
+        optimise_high_risk_threshold(
+            oof_results,
+            actual_high_threshold=
+                ACTUAL_HIGH_THRESHOLD,
+            target_recall=
+                TARGET_HIGH_RECALL,
+        )
+    )
+
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    threshold_results.to_csv(
+        OUTPUT_DIR
+        / "threshold_optimization.csv",
+        index=False,
+    )
+
+    selected_thresholds = (
+        threshold_results[
+            threshold_results[
+                "selected"
+            ]
+        ]
+    )
+
+    print()
+    print(
+        "HIGH-Risk Threshold Optimisation"
+    )
+    print(
+        "--------------------------------"
+    )
+
+    print(
+        "Actual HIGH definition: "
+        f"RUL <= "
+        f"{ACTUAL_HIGH_THRESHOLD} cycles"
+    )
+
+    print(
+        "Target OOF HIGH-risk recall: "
+        f"{TARGET_HIGH_RECALL:.0%}"
+    )
+
+    if not selected_thresholds.empty:
+
+        selected = (
+            selected_thresholds.iloc[0]
+        )
+
+        optimised_high_threshold = int(
+            selected[
+                "threshold"
+            ]
+        )
+
+        print(
+            "Selected predicted-RUL threshold: "
+            f"{optimised_high_threshold} cycles"
+        )
+
+        print(
+            "OOF HIGH-risk recall: "
+            f"{selected['high_recall']:.1%}"
+        )
+
+        print(
+            "OOF HIGH-risk precision: "
+            f"{selected['high_precision']:.1%}"
+        )
+
+        print(
+            "OOF false-positive rate: "
+            f"{selected['false_positive_rate']:.1%}"
+        )
+
+        print(
+            "OOF false negatives: "
+            f"{int(selected['false_negative'])}"
+        )
+
+        print(
+            "OOF false positives: "
+            f"{int(selected['false_positive'])}"
+        )
+
+    else:
+
+        optimised_high_threshold = (
+            ACTUAL_HIGH_THRESHOLD
+        )
+
+        print(
+            "No threshold achieved the "
+            "target recall."
+        )
+
+        print(
+            "Using default HIGH threshold: "
+            f"{optimised_high_threshold} cycles"
+        )
+
+    print(
+        "Threshold results saved to: "
+        "outputs/threshold_optimization.csv"
+    )
+
+    # =====================================================
+    # FINAL CAPPED MODEL
+    # =====================================================
 
     capped_final_model = (
         train_final_model(
@@ -1304,12 +1731,14 @@ if __name__ == "__main__":
         f"{capped_test_mae:.2f} cycles"
     )
 
-    # ---------------------------------------------------------
-    # Risk-region error analysis
-    # ---------------------------------------------------------
+    # =====================================================
+    # RISK-REGION ERROR ANALYSIS
+    # =====================================================
 
-    risk_analysis = analyse_risk_regions(
-        capped_results
+    risk_analysis = (
+        analyse_risk_regions(
+            capped_results
+        )
     )
 
     print()
@@ -1337,67 +1766,149 @@ if __name__ == "__main__":
                     f"{x:.1f}%",
             },
         )
-    )  
+    )
 
-        # ---------------------------------------------------------
-    # Maintenance classification analysis
-    # ---------------------------------------------------------
+    # =====================================================
+    # DEFAULT 30-CYCLE CLASSIFICATION
+    # =====================================================
 
     (
-        classification_results,
-        confusion_matrix,
-        classification_summary,
+        default_classification_results,
+        default_confusion_matrix,
+        default_summary,
     ) = analyse_maintenance_classification(
-        capped_results
+        capped_results,
+        predicted_high_threshold=
+            ACTUAL_HIGH_THRESHOLD,
     )
 
     print()
     print(
-        "Maintenance Risk Classification"
+        "Maintenance Classification "
+        "(Default Threshold)"
     )
     print(
-        "-------------------------------"
+        "----------------------------------------------"
+    )
+
+    print(
+        f"Predicted HIGH threshold: "
+        f"{ACTUAL_HIGH_THRESHOLD} cycles"
     )
 
     print()
     print(
-        confusion_matrix.to_string()
+        default_confusion_matrix.to_string()
     )
 
     print()
     print(
         "Overall classification accuracy: "
-        f"{classification_summary['accuracy']:.1%}"
-    )
-
-    print(
-        "HIGH-risk engines: "
-        f"{classification_summary['high_risk_engines']}"
-    )
-
-    print(
-        "HIGH-risk correctly identified: "
-        f"{classification_summary['high_risk_correct']}"
-    )
-
-    print(
-        "HIGH-risk missed: "
-        f"{classification_summary['high_risk_missed']}"
+        f"{default_summary['accuracy']:.1%}"
     )
 
     print(
         "HIGH-risk recall: "
-        f"{classification_summary['high_risk_recall']:.1%}"
+        f"{default_summary['high_risk_recall']:.1%}"
     )
 
     print(
-        "HIGH-risk engines incorrectly "
-        "classified as LOW: "
-        f"{classification_summary['high_to_low_misses']}"
-    ) 
-    # =========================================================
-    # MAINTENANCE DECISION USING CAPPED MODEL
-    # =========================================================
+        "HIGH-risk precision: "
+        f"{default_summary['high_risk_precision']:.1%}"
+    )
+
+    print(
+        "HIGH-risk missed: "
+        f"{default_summary['high_risk_missed']}"
+    )
+
+    print(
+        "False HIGH alerts: "
+        f"{default_summary['false_high_alerts']}"
+    )
+
+    print(
+        "HIGH-risk engines classified as LOW: "
+        f"{default_summary['high_to_low_misses']}"
+    )
+
+    # =====================================================
+    # OPTIMISED CLASSIFICATION
+    # =====================================================
+
+    (
+        optimised_classification_results,
+        optimised_confusion_matrix,
+        optimised_summary,
+    ) = analyse_maintenance_classification(
+        capped_results,
+        predicted_high_threshold=
+            optimised_high_threshold,
+    )
+
+    print()
+    print(
+        "Maintenance Classification "
+        "(Optimised Threshold)"
+    )
+    print(
+        "------------------------------------------------"
+    )
+
+    print(
+        "Predicted HIGH threshold: "
+        f"{optimised_high_threshold} cycles"
+    )
+
+    print()
+    print(
+        optimised_confusion_matrix.to_string()
+    )
+
+    print()
+    print(
+        "Overall classification accuracy: "
+        f"{optimised_summary['accuracy']:.1%}"
+    )
+
+    print(
+        "HIGH-risk engines: "
+        f"{optimised_summary['high_risk_engines']}"
+    )
+
+    print(
+        "HIGH-risk correctly identified: "
+        f"{optimised_summary['high_risk_correct']}"
+    )
+
+    print(
+        "HIGH-risk missed: "
+        f"{optimised_summary['high_risk_missed']}"
+    )
+
+    print(
+        "HIGH-risk recall: "
+        f"{optimised_summary['high_risk_recall']:.1%}"
+    )
+
+    print(
+        "HIGH-risk precision: "
+        f"{optimised_summary['high_risk_precision']:.1%}"
+    )
+
+    print(
+        "False HIGH alerts: "
+        f"{optimised_summary['false_high_alerts']}"
+    )
+
+    print(
+        "HIGH-risk engines classified as LOW: "
+        f"{optimised_summary['high_to_low_misses']}"
+    )
+
+    # =====================================================
+    # MAINTENANCE DECISION USING OPTIMISED THRESHOLD
+    # =====================================================
 
     example_engine = (
         capped_results.iloc[0]
@@ -1407,7 +1918,9 @@ if __name__ == "__main__":
         maintenance_decision(
             example_engine[
                 "predicted_rul_capped"
-            ]
+            ],
+            high_threshold=
+                optimised_high_threshold,
         )
     )
 
@@ -1440,6 +1953,11 @@ if __name__ == "__main__":
         "Predicted capped RUL: "
         f"{decision['predicted_rul']:.1f} "
         "cycles"
+    )
+
+    print(
+        "Operational HIGH threshold: "
+        f"{optimised_high_threshold} cycles"
     )
 
     print(
