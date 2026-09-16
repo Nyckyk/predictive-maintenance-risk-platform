@@ -676,6 +676,119 @@ def analyse_risk_regions(
 
     return risk_summary 
 
+def analyse_maintenance_classification(
+    results: pd.DataFrame,
+):
+    """Evaluate maintenance-risk classification performance."""
+
+    analysis = results.copy()
+
+    def assign_risk(rul: float) -> str:
+        if rul <= 30:
+            return "HIGH"
+
+        if rul <= 60:
+            return "MEDIUM"
+
+        return "LOW"
+
+    analysis["actual_risk"] = (
+        analysis["actual_rul_capped"]
+        .apply(assign_risk)
+    )
+
+    analysis["predicted_risk"] = (
+        analysis["predicted_rul_capped"]
+        .apply(assign_risk)
+    )
+
+    risk_order = [
+        "HIGH",
+        "MEDIUM",
+        "LOW",
+    ]
+
+    confusion_matrix = pd.crosstab(
+        analysis["actual_risk"],
+        analysis["predicted_risk"],
+        rownames=["Actual"],
+        colnames=["Predicted"],
+    )
+
+    confusion_matrix = (
+        confusion_matrix
+        .reindex(
+            index=risk_order,
+            columns=risk_order,
+            fill_value=0,
+        )
+    )
+
+    correct = (
+        analysis["actual_risk"]
+        == analysis["predicted_risk"]
+    )
+
+    accuracy = correct.mean()
+
+    high_risk = (
+        analysis["actual_risk"]
+        == "HIGH"
+    )
+
+    high_risk_correct = (
+        high_risk
+        & (
+            analysis["predicted_risk"]
+            == "HIGH"
+        )
+    )
+
+    high_risk_recall = (
+        high_risk_correct.sum()
+        / high_risk.sum()
+    )
+
+    high_risk_missed = (
+        high_risk
+        & (
+            analysis["predicted_risk"]
+            != "HIGH"
+        )
+    )
+
+    high_to_low = (
+        high_risk
+        & (
+            analysis["predicted_risk"]
+            == "LOW"
+        )
+    )
+
+    summary = {
+        "accuracy": accuracy,
+        "high_risk_engines": int(
+            high_risk.sum()
+        ),
+        "high_risk_correct": int(
+            high_risk_correct.sum()
+        ),
+        "high_risk_missed": int(
+            high_risk_missed.sum()
+        ),
+        "high_risk_recall":
+            high_risk_recall,
+        "high_to_low_misses": int(
+            high_to_low.sum()
+        ),
+    }
+
+    return (
+        analysis,
+        confusion_matrix,
+        summary,
+    ) 
+
 # ---------------------------------------------------------
 # Maintenance decision
 # ---------------------------------------------------------
@@ -1224,6 +1337,63 @@ if __name__ == "__main__":
                     f"{x:.1f}%",
             },
         )
+    )  
+
+        # ---------------------------------------------------------
+    # Maintenance classification analysis
+    # ---------------------------------------------------------
+
+    (
+        classification_results,
+        confusion_matrix,
+        classification_summary,
+    ) = analyse_maintenance_classification(
+        capped_results
+    )
+
+    print()
+    print(
+        "Maintenance Risk Classification"
+    )
+    print(
+        "-------------------------------"
+    )
+
+    print()
+    print(
+        confusion_matrix.to_string()
+    )
+
+    print()
+    print(
+        "Overall classification accuracy: "
+        f"{classification_summary['accuracy']:.1%}"
+    )
+
+    print(
+        "HIGH-risk engines: "
+        f"{classification_summary['high_risk_engines']}"
+    )
+
+    print(
+        "HIGH-risk correctly identified: "
+        f"{classification_summary['high_risk_correct']}"
+    )
+
+    print(
+        "HIGH-risk missed: "
+        f"{classification_summary['high_risk_missed']}"
+    )
+
+    print(
+        "HIGH-risk recall: "
+        f"{classification_summary['high_risk_recall']:.1%}"
+    )
+
+    print(
+        "HIGH-risk engines incorrectly "
+        "classified as LOW: "
+        f"{classification_summary['high_to_low_misses']}"
     ) 
     # =========================================================
     # MAINTENANCE DECISION USING CAPPED MODEL
