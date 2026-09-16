@@ -7,7 +7,10 @@ from sklearn.ensemble import (
     GradientBoostingRegressor,
     RandomForestRegressor,
 )
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import (
+    LinearRegression,
+    LogisticRegression,
+)
 from sklearn.metrics import mean_absolute_error
 from sklearn.model_selection import GroupKFold
 
@@ -30,6 +33,10 @@ MEDIUM_THRESHOLD = 60
 TARGET_HIGH_RECALL = 0.90
 THRESHOLD_SEARCH_MIN = 20
 THRESHOLD_SEARCH_MAX = 60
+
+# Illustrative financial assumptions.
+MAINTENANCE_COST = 8000
+FAILURE_COST = 40000
 
 
 COLUMN_NAMES = (
@@ -57,7 +64,7 @@ MODEL_NAMES = [
 # =========================================================
 
 def create_model(name: str):
-    """Create one of the candidate regression models."""
+    """Create one of the candidate RUL regression models."""
 
     if name == "Linear Regression":
         return LinearRegression()
@@ -277,7 +284,7 @@ def train_baseline_model(
 
 
 # =========================================================
-# SINGLE VALIDATION SPLIT
+# SINGLE-SPLIT MODEL COMPARISON
 # =========================================================
 
 def compare_models(
@@ -340,8 +347,12 @@ def compare_models(
 
     return (
         pd.DataFrame(results)
-        .sort_values("validation_mae")
-        .reset_index(drop=True)
+        .sort_values(
+            "validation_mae"
+        )
+        .reset_index(
+            drop=True
+        )
     )
 
 
@@ -426,6 +437,7 @@ def cross_validate_models(
         results.append(
             {
                 "model": name,
+
                 "mean_mae":
                     sum(fold_maes)
                     / len(fold_maes),
@@ -440,8 +452,12 @@ def cross_validate_models(
 
     return (
         pd.DataFrame(results)
-        .sort_values("mean_mae")
-        .reset_index(drop=True)
+        .sort_values(
+            "mean_mae"
+        )
+        .reset_index(
+            drop=True
+        )
     )
 
 
@@ -456,8 +472,8 @@ def generate_oof_predictions(
     """
     Generate engine-safe out-of-fold predictions.
 
-    No engine is predicted by a model that was trained
-    using data from that same engine.
+    No engine is predicted by a model trained using
+    data from that same engine.
     """
 
     X = df[
@@ -532,10 +548,8 @@ def optimise_high_risk_threshold(
     target_recall: float = TARGET_HIGH_RECALL,
 ) -> pd.DataFrame:
     """
-    Select an alert threshold using training OOF predictions.
-
-    The lowest-cost threshold meeting the requested HIGH-risk
-    recall is selected by minimising the false-positive rate.
+    Select an operational alert threshold using training
+    out-of-fold predictions only.
     """
 
     actual_high = (
@@ -643,14 +657,14 @@ def optimise_high_risk_threshold(
         results
     )
 
+    results_df[
+        "selected"
+    ] = False
+
     eligible = results_df[
         results_df["high_recall"]
         >= target_recall
     ]
-
-    results_df[
-        "selected"
-    ] = False
 
     if not eligible.empty:
 
@@ -679,14 +693,96 @@ def optimise_high_risk_threshold(
 
 
 # =========================================================
-# FINAL MODEL
+# FAILURE-RISK PROBABILITY MODEL
+# =========================================================
+
+def train_failure_risk_model(
+    oof_results: pd.DataFrame,
+):
+    """
+    Estimate the probability that an engine is within
+    30 cycles of failure from its predicted capped RUL.
+
+    The model is trained using engine-safe OOF predictions.
+    """
+
+    risk_data = oof_results.copy()
+
+    # Keep the probability model's input consistent with
+    # the capped RUL value used during deployment.
+    risk_data[
+        "predicted_rul"
+    ] = (
+        risk_data[
+            "predicted_rul"
+        ]
+        .clip(
+            lower=0,
+            upper=RUL_CAP,
+        )
+    )
+
+    risk_data[
+        "actual_high"
+    ] = (
+        risk_data["rul"]
+        <= ACTUAL_HIGH_THRESHOLD
+    ).astype(int)
+
+    X = risk_data[
+        ["predicted_rul"]
+    ]
+
+    y = risk_data[
+        "actual_high"
+    ]
+
+    # Equalise the total influence of each engine.
+    engine_rows = (
+        risk_data
+        .groupby("engine_id")["engine_id"]
+        .transform("count")
+    )
+
+    sample_weights = (
+        1.0
+        / engine_rows
+    )
+
+    # Rescale weights so their mean is approximately 1.
+    # This avoids unintentionally changing the relative
+    # strength of LogisticRegression regularisation.
+    sample_weights = (
+        sample_weights
+        * (
+            len(sample_weights)
+            / sample_weights.sum()
+        )
+    )
+
+    risk_model = LogisticRegression(
+        max_iter=1000,
+        random_state=42,
+    )
+
+    risk_model.fit(
+        X,
+        y,
+        sample_weight=sample_weights,
+    )
+
+    return risk_model
+
+
+# =========================================================
+# FINAL RUL MODEL
 # =========================================================
 
 def train_final_model(
     df: pd.DataFrame,
     model_name: str,
 ):
-    """Train the selected model on all training engines."""
+    """Train the selected RUL model on all training engines."""
 
     X_train = df[
         FEATURE_COLUMNS
@@ -854,7 +950,7 @@ def evaluate_capped_test_set(
 def analyse_risk_regions(
     results: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Measure error within actual maintenance-risk regions."""
+    """Measure RUL error within actual maintenance-risk regions."""
 
     analysis = results.copy()
 
@@ -1108,14 +1204,12 @@ def analyse_maintenance_classification(
 
 
 # =========================================================
-# MAINTENANCE DECISION
+# OPERATIONAL MAINTENANCE DECISION
 # =========================================================
 
 def maintenance_decision(
     predicted_rul: float,
     high_threshold: int,
-    maintenance_cost: float = 8000,
-    failure_cost: float = 40000,
 ) -> dict:
     """Convert predicted RUL into an operational decision."""
 
@@ -1147,11 +1241,6 @@ def maintenance_decision(
             "Continue operating"
         )
 
-    cost_difference = (
-        failure_cost
-        - maintenance_cost
-    )
-
     return {
         "predicted_rul":
             predicted_rul,
@@ -1161,15 +1250,175 @@ def maintenance_decision(
 
         "recommendation":
             recommendation,
+    }
 
-        "maintenance_cost":
-            maintenance_cost,
 
-        "failure_cost":
-            failure_cost,
+# =========================================================
+# FINANCIAL RISK MODEL
+# =========================================================
 
-        "cost_difference":
-            cost_difference,
+def calculate_financial_risk(
+    results: pd.DataFrame,
+    risk_model,
+    maintenance_cost: float = MAINTENANCE_COST,
+    failure_cost: float = FAILURE_COST,
+) -> pd.DataFrame:
+    """
+    Convert estimated HIGH-risk probability into an
+    illustrative expected financial decision.
+
+    This assumes the probability of being within 30 cycles
+    of failure is a proxy for failure exposure over the
+    decision horizon.
+    """
+
+    financial_results = (
+        results.copy()
+    )
+
+    risk_features = (
+        financial_results[
+            ["predicted_rul_capped"]
+        ]
+        .rename(
+            columns={
+                "predicted_rul_capped":
+                    "predicted_rul"
+            }
+        )
+    )
+
+    high_risk_probability = (
+        risk_model.predict_proba(
+            risk_features
+        )[:, 1]
+    )
+
+    financial_results[
+        "high_risk_probability"
+    ] = high_risk_probability
+
+    financial_results[
+        "expected_failure_loss"
+    ] = (
+        financial_results[
+            "high_risk_probability"
+        ]
+        * failure_cost
+    )
+
+    financial_results[
+        "maintenance_cost"
+    ] = maintenance_cost
+
+    financial_results[
+        "failure_cost"
+    ] = failure_cost
+
+    financial_results[
+        "break_even_probability"
+    ] = (
+        maintenance_cost
+        / failure_cost
+    )
+
+    financial_results[
+        "financial_benefit"
+    ] = (
+        financial_results[
+            "expected_failure_loss"
+        ]
+        - maintenance_cost
+    )
+
+    financial_results[
+        "maintenance_economically_justified"
+    ] = (
+        financial_results[
+            "expected_failure_loss"
+        ]
+        >= maintenance_cost
+    )
+
+    financial_results[
+        "economic_action"
+    ] = financial_results[
+        "maintenance_economically_justified"
+    ].map(
+        {
+            True:
+                "Preventative maintenance",
+
+            False:
+                "Continue / monitor",
+        }
+    )
+
+    return financial_results
+
+
+def summarise_financial_risk(
+    financial_results: pd.DataFrame,
+) -> dict:
+    """
+    Summarise illustrative financial implications
+    across the test fleet.
+    """
+
+    justified = (
+        financial_results[
+            "maintenance_economically_justified"
+        ]
+    )
+
+    selected = (
+        financial_results[
+            justified
+        ]
+    )
+
+    maintenance_outlay = (
+        selected[
+            "maintenance_cost"
+        ].sum()
+    )
+
+    expected_failure_exposure = (
+        selected[
+            "expected_failure_loss"
+        ].sum()
+    )
+
+    expected_net_benefit = (
+        selected[
+            "financial_benefit"
+        ].sum()
+    )
+
+    break_even_probability = (
+        financial_results[
+            "break_even_probability"
+        ].iloc[0]
+    )
+
+    return {
+        "engines":
+            len(financial_results),
+
+        "maintenance_justified":
+            int(justified.sum()),
+
+        "break_even_probability":
+            break_even_probability,
+
+        "maintenance_outlay":
+            maintenance_outlay,
+
+        "expected_failure_exposure":
+            expected_failure_exposure,
+
+        "expected_net_benefit":
+            expected_net_benefit,
     }
 
 
@@ -1193,14 +1442,23 @@ def plot_test_predictions(
     )
 
     plt.scatter(
-        results["actual_rul"],
-        results["predicted_rul"],
+        results[
+            "actual_rul"
+        ],
+        results[
+            "predicted_rul"
+        ],
         alpha=0.7,
     )
 
     max_rul = max(
-        results["actual_rul"].max(),
-        results["predicted_rul"].max(),
+        results[
+            "actual_rul"
+        ].max(),
+
+        results[
+            "predicted_rul"
+        ].max(),
     )
 
     plt.plot(
@@ -1251,6 +1509,11 @@ def plot_test_predictions(
 
 if __name__ == "__main__":
 
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
     # =====================================================
     # UNCAPPED EXPERIMENT
     # =====================================================
@@ -1268,6 +1531,7 @@ if __name__ == "__main__":
     )
 
     print()
+
     print(
         f"Rows: {len(data):,}"
     )
@@ -1298,7 +1562,7 @@ if __name__ == "__main__":
     )
 
     # -----------------------------------------------------
-    # Baseline
+    # Baseline Linear Regression
     # -----------------------------------------------------
 
     (
@@ -1336,7 +1600,7 @@ if __name__ == "__main__":
     )
 
     # -----------------------------------------------------
-    # Model comparison
+    # Single-split model comparison
     # -----------------------------------------------------
 
     model_comparison = (
@@ -1377,7 +1641,7 @@ if __name__ == "__main__":
     )
 
     # -----------------------------------------------------
-    # Uncapped grouped CV
+    # Uncapped grouped cross-validation
     # -----------------------------------------------------
 
     cv_results = (
@@ -1454,7 +1718,7 @@ if __name__ == "__main__":
     )
 
     # -----------------------------------------------------
-    # Test data
+    # NASA test data
     # -----------------------------------------------------
 
     test_data = load_data(
@@ -1561,7 +1825,7 @@ if __name__ == "__main__":
     )
 
     # =====================================================
-    # THRESHOLD OPTIMISATION USING TRAINING DATA ONLY
+    # OUT-OF-FOLD TRAINING PREDICTIONS
     # =====================================================
 
     oof_results = (
@@ -1571,6 +1835,10 @@ if __name__ == "__main__":
         )
     )
 
+    # =====================================================
+    # HIGH-RISK THRESHOLD OPTIMISATION
+    # =====================================================
+
     threshold_results = (
         optimise_high_risk_threshold(
             oof_results,
@@ -1579,11 +1847,6 @@ if __name__ == "__main__":
             target_recall=
                 TARGET_HIGH_RECALL,
         )
-    )
-
-    OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
     )
 
     threshold_results.to_csv(
@@ -1652,12 +1915,14 @@ if __name__ == "__main__":
         )
 
         print(
-            "OOF false negatives: "
+            "OOF false negatives "
+            "(cycle observations): "
             f"{int(selected['false_negative'])}"
         )
 
         print(
-            "OOF false positives: "
+            "OOF false positives "
+            "(cycle observations): "
             f"{int(selected['false_positive'])}"
         )
 
@@ -1680,6 +1945,37 @@ if __name__ == "__main__":
     print(
         "Threshold results saved to: "
         "outputs/threshold_optimization.csv"
+    )
+
+    # =====================================================
+    # FAILURE-RISK PROBABILITY MODEL
+    # =====================================================
+
+    risk_probability_model = (
+        train_failure_risk_model(
+            oof_results
+        )
+    )
+
+    print()
+    print(
+        "Failure-Risk Probability Model"
+    )
+    print(
+        "------------------------------"
+    )
+
+    print(
+        "Model: Logistic Regression"
+    )
+
+    print(
+        "Input: out-of-fold predicted capped RUL"
+    )
+
+    print(
+        "Target: probability actual RUL "
+        f"<= {ACTUAL_HIGH_THRESHOLD} cycles"
     )
 
     # =====================================================
@@ -1769,7 +2065,7 @@ if __name__ == "__main__":
     )
 
     # =====================================================
-    # DEFAULT 30-CYCLE CLASSIFICATION
+    # DEFAULT THRESHOLD CLASSIFICATION
     # =====================================================
 
     (
@@ -1833,7 +2129,7 @@ if __name__ == "__main__":
     )
 
     # =====================================================
-    # OPTIMISED CLASSIFICATION
+    # OPTIMISED THRESHOLD CLASSIFICATION
     # =====================================================
 
     (
@@ -1907,7 +2203,7 @@ if __name__ == "__main__":
     )
 
     # =====================================================
-    # MAINTENANCE DECISION USING OPTIMISED THRESHOLD
+    # OPERATIONAL MAINTENANCE EXAMPLE
     # =====================================================
 
     example_engine = (
@@ -1970,25 +2266,167 @@ if __name__ == "__main__":
         f"{decision['recommendation']}"
     )
 
+    # =====================================================
+    # PROBABILITY-BASED FINANCIAL RISK
+    # =====================================================
+
+    financial_results = (
+        calculate_financial_risk(
+            capped_results,
+            risk_probability_model,
+            maintenance_cost=
+                MAINTENANCE_COST,
+            failure_cost=
+                FAILURE_COST,
+        )
+    )
+
+    financial_results.to_csv(
+        OUTPUT_DIR
+        / "financial_risk_results.csv",
+        index=False,
+    )
+
+    financial_summary = (
+        summarise_financial_risk(
+            financial_results
+        )
+    )
+
+    # Use the engine with the highest estimated
+    # HIGH-risk probability as the financial example.
+    financial_example = (
+        financial_results.loc[
+            financial_results[
+                "high_risk_probability"
+            ].idxmax()
+        ]
+    )
+
     print()
     print(
-        "Illustrative Financial Assumptions"
+        "Probability-Based Financial Risk"
     )
     print(
-        "----------------------------------"
+        "--------------------------------"
     )
 
     print(
-        "Planned maintenance cost: "
-        f"£{decision['maintenance_cost']:,.0f}"
+        "Illustrative assumptions:"
+    )
+
+    print(
+        "Preventative maintenance cost: "
+        f"£{MAINTENANCE_COST:,.0f}"
     )
 
     print(
         "Unplanned failure cost: "
-        f"£{decision['failure_cost']:,.0f}"
+        f"£{FAILURE_COST:,.0f}"
     )
 
     print(
-        "Cost difference: "
-        f"£{decision['cost_difference']:,.0f}"
+        "Break-even HIGH-risk probability: "
+        f"{financial_summary['break_even_probability']:.1%}"
+    )
+
+    print()
+    print(
+        "Highest estimated-risk test engine:"
+    )
+
+    print(
+        "Engine: "
+        f"{int(financial_example['engine_id'])}"
+    )
+
+    print(
+        "Current cycle: "
+        f"{int(financial_example['cycle'])}"
+    )
+
+    print(
+        "Actual capped RUL: "
+        f"{financial_example['actual_rul_capped']:.0f} "
+        "cycles"
+    )
+
+    print(
+        "Predicted capped RUL: "
+        f"{financial_example['predicted_rul_capped']:.1f} "
+        "cycles"
+    )
+
+    print(
+        "Estimated probability of being "
+        f"within {ACTUAL_HIGH_THRESHOLD} cycles "
+        "of failure: "
+        f"{financial_example['high_risk_probability']:.1%}"
+    )
+
+    print(
+        "Expected failure loss: "
+        f"£{financial_example['expected_failure_loss']:,.0f}"
+    )
+
+    print(
+        "Preventative maintenance cost: "
+        f"£{financial_example['maintenance_cost']:,.0f}"
+    )
+
+    print(
+        "Expected financial benefit "
+        "of maintenance: "
+        f"£{financial_example['financial_benefit']:,.0f}"
+    )
+
+    print(
+        "Maintenance economically justified: "
+        f"{financial_example['maintenance_economically_justified']}"
+    )
+
+    print(
+        "Economic action: "
+        f"{financial_example['economic_action']}"
+    )
+
+    print()
+    print(
+        "Illustrative Fleet Financial Summary"
+    )
+    print(
+        "------------------------------------"
+    )
+
+    print(
+        "Test engines: "
+        f"{financial_summary['engines']}"
+    )
+
+    print(
+        "Engines where maintenance is "
+        "economically justified: "
+        f"{financial_summary['maintenance_justified']}"
+    )
+
+    print(
+        "Maintenance outlay for those engines: "
+        f"£{financial_summary['maintenance_outlay']:,.0f}"
+    )
+
+    print(
+        "Expected failure exposure "
+        "for those engines: "
+        f"£{financial_summary['expected_failure_exposure']:,.0f}"
+    )
+
+    print(
+        "Illustrative expected net benefit: "
+        f"£{financial_summary['expected_net_benefit']:,.0f}"
+    )
+
+    print()
+    print(
+        "Financial results saved to: "
+        "outputs/financial_risk_results.csv"
     ) 
