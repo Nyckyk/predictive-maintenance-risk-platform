@@ -52,6 +52,101 @@ MODEL_NAMES = [
     "Gradient Boosting",
 ]
 
+def run_cost_sensitivity_analysis(
+    financial_results: pd.DataFrame,
+) -> pd.DataFrame:
+    """Evaluate maintenance decisions across multiple cost scenarios."""
+
+    maintenance_costs = [
+        5000,
+        8000,
+        10000,
+        12000,
+        15000,
+    ]
+
+    failure_costs = [
+        30000,
+        40000,
+        50000,
+        60000,
+    ]
+
+    scenarios = []
+
+    for maintenance_cost in maintenance_costs:
+
+        for failure_cost in failure_costs:
+
+            break_even_probability = (
+                maintenance_cost
+                / failure_cost
+            )
+
+            probabilities = (
+                financial_results[
+                    "high_risk_probability"
+                ]
+            )
+
+            selected = (
+                probabilities
+                >= break_even_probability
+            )
+
+            selected_probabilities = (
+                probabilities[
+                    selected
+                ]
+            )
+
+            engines_selected = int(
+                selected.sum()
+            )
+
+            maintenance_outlay = (
+                engines_selected
+                * maintenance_cost
+            )
+
+            risk_adjusted_exposure = (
+                selected_probabilities.sum()
+                * failure_cost
+            )
+
+            net_benefit = (
+                risk_adjusted_exposure
+                - maintenance_outlay
+            )
+
+            scenarios.append(
+                {
+                    "maintenance_cost":
+                        maintenance_cost,
+
+                    "failure_cost":
+                        failure_cost,
+
+                    "break_even_probability":
+                        break_even_probability,
+
+                    "engines_selected":
+                        engines_selected,
+
+                    "maintenance_outlay":
+                        maintenance_outlay,
+
+                    "risk_adjusted_exposure":
+                        risk_adjusted_exposure,
+
+                    "risk_adjusted_net_benefit":
+                        net_benefit,
+                }
+            )
+
+    return pd.DataFrame(
+        scenarios
+    )  
 
 # =========================================================
 # MODEL CREATION
@@ -1297,6 +1392,19 @@ if __name__ == "__main__":
         index=False,
     )
 
+    # =====================================================
+    # FINANCIAL COST SENSITIVITY ANALYSIS
+    # =====================================================
+
+    sensitivity_results = run_cost_sensitivity_analysis(
+        financial_results
+    )
+
+    sensitivity_results.to_csv(
+        OUTPUT_DIR / "cost_sensitivity_analysis.csv",
+        index=False,
+    )
+
     financial_summary = summarise_financial_risk(financial_results)
     probability_evaluation = evaluate_probability_model(financial_results)
 
@@ -1423,3 +1531,37 @@ if __name__ == "__main__":
         "Calibration results saved to: "
         "outputs/probability_calibration.csv"
     )
+
+    print()
+    print("Financial Cost Sensitivity Analysis")
+    print("-----------------------------------")
+    print(
+        sensitivity_results.to_string(
+            index=False,
+            formatters={
+                "maintenance_cost":
+                    lambda x: f"£{x:,.0f}",
+
+                "failure_cost":
+                    lambda x: f"£{x:,.0f}",
+
+                "break_even_probability":
+                    lambda x: f"{x:.1%}",
+
+                "maintenance_outlay":
+                    lambda x: f"£{x:,.0f}",
+
+                "risk_adjusted_exposure":
+                    lambda x: f"£{x:,.0f}",
+
+                "risk_adjusted_net_benefit":
+                    lambda x: f"£{x:,.0f}",
+            },
+        )
+    )
+
+    print()
+    print(
+        "Sensitivity analysis saved to: "
+        "outputs/cost_sensitivity_analysis.csv"
+    ) 
