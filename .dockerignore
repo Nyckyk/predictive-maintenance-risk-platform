@@ -1,0 +1,27 @@
+# Git
+.git
+.github
+
+# Python
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# Tests and local caches
+tests
+.pytest_cache
+.pytest_tmp
+TESTING.md
+requirements-dev.txt
+pytest.ini
+
+# Raw training data is not needed by the dashboard container
+data/raw
+
+# Local/editor files
+.vscode
+.idea
+.env
+*.log
