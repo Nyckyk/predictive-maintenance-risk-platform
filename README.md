@@ -2,11 +2,21 @@
 
 [![Tests](https://github.com/Nyckyk/predictive-maintenance-risk-platform/actions/workflows/tests.yml/badge.svg)](https://github.com/Nyckyk/predictive-maintenance-risk-platform/actions/workflows/tests.yml)
 
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://predictivemaintenancerisk.streamlit.app)
+
 An end to end predictive maintenance decision support project built with NASA C-MAPSS turbofan degradation data.
 
 The platform predicts **Remaining Useful Life (RUL)** from multivariate sensor data, converts predictions into operational maintenance risk categories, estimates short horizon HIGH risk probability, and explores illustrative maintenance versus failure cost scenarios through an interactive Streamlit dashboard.
 
 > **Portfolio note:** The financial layer uses illustrative cost assumptions. It does not represent measured NASA maintenance costs or demonstrated real world savings.
+
+---
+
+## Live Demo
+
+The deployed dashboard is available here:
+
+https://predictivemaintenancerisk.streamlit.app
 
 ---
 
@@ -621,7 +631,6 @@ Potential extensions include:
 - evaluate probability calibration on larger validation datasets
 - connect the dashboard to a live database or API
 - add maintenance history and asset cost inputs
-- deploy the dashboard as a public live demo
 
 ---
 
